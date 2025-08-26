@@ -171,10 +171,13 @@ pub enum NetworkIdType {
 /// ```
 /// In this example, 2 domains will be created for "foo.example" and "bar.exaple" using
 /// the template.
+use std::collections::{HashMap, HashSet};
+
 pub async fn load_data(
     config: &ServiceConfig,
     store: &dyn StoreOps,
     truncate: bool,
+    mut file_state: Option<&mut HashMap<PathBuf, SystemTime>>,
 ) -> Result<(), RdapServerError> {
     let mut json_count: usize = 0;
     let mut template_count: usize = 0;
@@ -193,9 +196,37 @@ pub async fn load_data(
         return Ok(());
     }
 
+    if truncate {
+        if let Some(state) = file_state.as_deref_mut() {
+            state.clear();
+        }
+    }
+
+    let mut current: HashSet<PathBuf> = HashSet::new();
     let mut entries = tokio::fs::read_dir(path).await?;
     while let Some(entry) = entries.next_entry().await? {
         let entry_path = entry.path();
+        let meta = tokio::fs::metadata(&entry_path).await?;
+        let modified = meta.modified()?;
+        current.insert(entry_path.clone());
+
+        if let Some(state) = file_state.as_deref_mut() {
+            if !truncate {
+                if let Some(prev) = state.get(&entry_path) {
+                    if *prev >= modified {
+                        info!("Skipping unchanged file: {}", entry_path.display());
+                        continue;
+                    }
+                    info!("Reloading modified file: {}", entry_path.display());
+                } else {
+                    info!("Loading new file: {}", entry_path.display());
+                }
+            } else {
+                info!("Reloading modified file: {}", entry_path.display());
+            }
+            state.insert(entry_path.clone(), modified);
+        }
+
         let contents = tokio::fs::read_to_string(&entry_path).await?;
         if entry_path
             .extension()
@@ -372,6 +403,7 @@ async fn load_rdap_template(
 pub(crate) async fn reload_data(
     store: Box<dyn StoreOps>,
     config: ServiceConfig,
+    mut file_state: HashMap<PathBuf, SystemTime>,
 ) -> Result<(), RdapServerError> {
     let update_path = PathBuf::from(&config.data_dir);
     let update_path = update_path.join(UPDATE);
@@ -386,7 +418,7 @@ pub(crate) async fn reload_data(
             if modified > last_time {
                 last_time = modified;
                 info!("Data being updated.");
-                load_data(&config, &*store, false).await?;
+                load_data(&config, &*store, false, Some(&mut file_state)).await?;
             }
         };
         let reload_meta = tokio::fs::metadata(&reload_path).await;
@@ -395,7 +427,7 @@ pub(crate) async fn reload_data(
             if modified > last_time {
                 last_time = modified;
                 info!("Data being reloaded.");
-                load_data(&config, &*store, true).await?;
+                load_data(&config, &*store, false, Some(&mut file_state)).await?;
             }
         };
     }

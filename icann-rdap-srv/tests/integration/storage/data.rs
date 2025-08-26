@@ -37,6 +37,7 @@ async fn new_and_init_mem(data_dir: String) -> Mem {
             .expect("building service config"),
         &mem,
         false,
+        None,
     )
     .await
     .expect("loading data");

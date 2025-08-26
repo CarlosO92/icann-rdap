@@ -634,6 +634,7 @@ mod tests {
                 .expect("building service config"),
             &mem,
             false,
+            None,
         )
         .await
         .expect("loading data");

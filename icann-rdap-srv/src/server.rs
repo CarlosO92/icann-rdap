@@ -1,5 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use {
     async_trait::async_trait,
     axum::{error_handling::HandleErrorLayer, Router},
@@ -113,9 +112,10 @@ async fn init_data(
     store: Box<dyn StoreOps>,
     config: &ServiceConfig,
 ) -> Result<(), RdapServerError> {
-    load_data(config, &*store, false).await?;
+    let mut state = HashMap::new();
+    load_data(config, &*store, false, Some(&mut state)).await?;
     if config.auto_reload {
-        tokio::spawn(reload_data(store, config.clone()));
+        tokio::spawn(reload_data(store, config.clone(), state));
     }
     Ok(())
 }
