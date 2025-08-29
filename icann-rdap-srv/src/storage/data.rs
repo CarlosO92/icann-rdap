@@ -173,11 +173,18 @@ pub enum NetworkIdType {
 /// the template.
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DataFileType {
+    Json,
+    Template,
+    Help,
+}
+
 pub async fn load_data(
     config: &ServiceConfig,
     store: &dyn StoreOps,
     truncate: bool,
-    mut file_state: Option<&mut HashMap<PathBuf, SystemTime>>,
+    mut file_state: Option<&mut HashMap<PathBuf, (SystemTime, DataFileType)>>,
 ) -> Result<(), RdapServerError> {
     let mut json_count: usize = 0;
     let mut template_count: usize = 0;
@@ -196,11 +203,10 @@ pub async fn load_data(
         return Ok(());
     }
 
-    if truncate {
-        if let Some(state) = file_state.as_deref_mut() {
-            state.clear();
-        }
-    }
+    // When performing a full reload we keep the existing state until after all
+    // files have been processed so we can determine which files were removed
+    // from the directory. The state will be updated with the new modification
+    // times as we load each file and pruned at the end of the run.
 
     let mut current: HashSet<PathBuf> = HashSet::new();
     let mut entries = tokio::fs::read_dir(path).await?;
@@ -210,50 +216,92 @@ pub async fn load_data(
         let modified = meta.modified()?;
         current.insert(entry_path.clone());
 
+        let ext = entry_path.extension().and_then(|e| e.to_str());
+        let file_type = match ext {
+            Some("template") => DataFileType::Template,
+            Some("json") => DataFileType::Json,
+            Some("help") => DataFileType::Help,
+            _ => {
+                continue;
+            }
+        };
+
         if let Some(state) = file_state.as_deref_mut() {
-            if !truncate {
-                if let Some(prev) = state.get(&entry_path) {
-                    if *prev >= modified {
-                        info!("Skipping unchanged file: {}", entry_path.display());
-                        continue;
-                    }
-                    info!("Reloading modified file: {}", entry_path.display());
-                } else {
+            if let Some((prev, _)) = state.get(&entry_path) {
+                if !truncate && *prev >= modified {
+                    info!("Skipping unchanged file: {}", entry_path.display());
+                    continue;
+                }
+                if truncate {
                     info!("Loading new file: {}", entry_path.display());
+                } else {
+                    info!("Reloading modified file: {}", entry_path.display());
                 }
             } else {
-                info!("Reloading modified file: {}", entry_path.display());
+                info!("Loading new file: {}", entry_path.display());
             }
-            state.insert(entry_path.clone(), modified);
+            state.insert(entry_path.clone(), (modified, file_type));
         }
 
         let contents = tokio::fs::read_to_string(&entry_path).await?;
-        if entry_path
-            .extension()
-            .map_or(false, |ext| ext == "template")
-        {
-            load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-            template_count += 1;
-        } else if entry_path.extension().map_or(false, |ext| ext == "json") {
-            load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-            json_count += 1;
-        } else if entry_path.extension().map_or(false, |ext| ext == "help") {
-            load_srvhelp(
-                &contents,
-                &entry_path.to_string_lossy(),
-                &entry.file_name().to_string_lossy(),
-                &mut tx,
-            )
-            .await?;
-            srvhelp_count += 1;
+        match file_type {
+            DataFileType::Template => {
+                load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                template_count += 1;
+            }
+            DataFileType::Json => {
+                load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                json_count += 1;
+            }
+            DataFileType::Help => {
+                load_srvhelp(
+                    &contents,
+                    &entry_path.to_string_lossy(),
+                    &entry.file_name().to_string_lossy(),
+                    &mut tx,
+                )
+                .await?;
+                srvhelp_count += 1;
+            }
         }
     }
 
-    info!("{json_count} RDAP JSON files loaded.");
-    info!("{template_count} RDAP template files loaded.");
-    info!("{srvhelp_count} RDAP server help files loaded.");
-    if json_count == 0 && template_count == 0 && srvhelp_count == 0 {
-        warn!("No data loaded. Server has no content to serve.");
+    if truncate {
+        if let Some(state) = file_state.as_deref_mut() {
+            state.retain(|p, _| {
+                let keep = current.contains(p);
+                if !keep {
+                    info!("Removing deleted file from cache: {}", p.display());
+                }
+                keep
+            });
+        }
+    }
+
+    if let Some(state) = file_state.as_deref() {
+        let mut json_total = 0;
+        let mut template_total = 0;
+        let mut help_total = 0;
+        for (_, (_, ty)) in state.iter() {
+            match ty {
+                DataFileType::Json => json_total += 1,
+                DataFileType::Template => template_total += 1,
+                DataFileType::Help => help_total += 1,
+            }
+        }
+        info!("{json_total} RDAP JSON files loaded.");
+        info!("{template_total} RDAP template files loaded.");
+        info!("{help_total} RDAP server help files loaded.");
+        if json_total == 0 && template_total == 0 && help_total == 0 {
+            warn!("No data loaded. Server has no content to serve.");
+        }
+    } else {
+        info!("{json_count} RDAP JSON files loaded.");
+        info!("{template_count} RDAP template files loaded.");
+        info!("{srvhelp_count} RDAP server help files loaded.");
+        if json_count == 0 && template_count == 0 && srvhelp_count == 0 {
+            warn!("No data loaded. Server has no content to serve.");
+        }
     }
     tx.commit().await?;
     Ok(())
@@ -403,7 +451,7 @@ async fn load_rdap_template(
 pub(crate) async fn reload_data(
     store: Box<dyn StoreOps>,
     config: ServiceConfig,
-    mut file_state: HashMap<PathBuf, SystemTime>,
+    mut file_state: HashMap<PathBuf, (SystemTime, DataFileType)>,
 ) -> Result<(), RdapServerError> {
     let update_path = PathBuf::from(&config.data_dir);
     let update_path = update_path.join(UPDATE);

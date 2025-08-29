@@ -18,7 +18,7 @@ use crate::{
     error::RdapServerError,
     rdap::router::rdap_router,
     storage::{
-        data::{load_data, reload_data},
+        data::{self, load_data, reload_data},
         mem::{config::MemConfig, ops::Mem},
         pg::{config::PgConfig, ops::Pg},
         StoreOps,
@@ -112,7 +112,8 @@ async fn init_data(
     store: Box<dyn StoreOps>,
     config: &ServiceConfig,
 ) -> Result<(), RdapServerError> {
-    let mut state = HashMap::new();
+    let mut state: HashMap<std::path::PathBuf, (std::time::SystemTime, data::DataFileType)> =
+        HashMap::new();
     load_data(config, &*store, false, Some(&mut state)).await?;
     if config.auto_reload {
         tokio::spawn(reload_data(store, config.clone(), state));
