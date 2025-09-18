@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use {
     async_trait::async_trait,
-    axum::{error_handling::HandleErrorLayer, Router},
+    axum::{Router, error_handling::HandleErrorLayer},
     http::{Method, StatusCode},
     icann_rdap_common::VERSION,
     tokio::net::TcpListener,
@@ -18,10 +18,10 @@ use crate::{
     error::RdapServerError,
     rdap::router::rdap_router,
     storage::{
+        StoreOps,
         data::{self, load_data, reload_data},
         mem::{config::MemConfig, ops::Mem},
         pg::{config::PgConfig, ops::Pg},
-        StoreOps,
     },
 };
 
@@ -114,7 +114,7 @@ async fn init_data(
 ) -> Result<(), RdapServerError> {
     let mut state: HashMap<std::path::PathBuf, (std::time::SystemTime, data::DataFileType)> =
         HashMap::new();
-    load_data(config, &*store, false, Some(&mut state)).await?;
+    load_data(config, &*store, false, Some(&mut state), None).await?;
     if config.auto_reload {
         tokio::spawn(reload_data(store, config.clone(), state));
     }

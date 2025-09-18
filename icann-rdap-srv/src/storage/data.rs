@@ -1,4 +1,5 @@
 use std::{
+    io::ErrorKind,
     net::IpAddr,
     path::PathBuf,
     time::{Duration, SystemTime},
@@ -28,6 +29,7 @@ use crate::{
 };
 
 pub const UPDATE: &str = "update";
+pub const UPDATE_LIST: &str = "update.list";
 pub const RELOAD: &str = "reload";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Display)]
@@ -185,6 +187,7 @@ pub async fn load_data(
     store: &dyn StoreOps,
     truncate: bool,
     mut file_state: Option<&mut HashMap<PathBuf, (SystemTime, DataFileType)>>,
+    files: Option<&[PathBuf]>,
 ) -> Result<(), RdapServerError> {
     let mut json_count: usize = 0;
     let mut template_count: usize = 0;
@@ -208,66 +211,143 @@ pub async fn load_data(
     // from the directory. The state will be updated with the new modification
     // times as we load each file and pruned at the end of the run.
 
-    let mut current: HashSet<PathBuf> = HashSet::new();
-    let mut entries = tokio::fs::read_dir(path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let entry_path = entry.path();
-        let meta = tokio::fs::metadata(&entry_path).await?;
-        let modified = meta.modified()?;
-        current.insert(entry_path.clone());
-
-        let ext = entry_path.extension().and_then(|e| e.to_str());
-        let file_type = match ext {
-            Some("template") => DataFileType::Template,
-            Some("json") => DataFileType::Json,
-            Some("help") => DataFileType::Help,
-            _ => {
+    let mut current = if truncate { Some(HashSet::new()) } else { None };
+    let mut processed: HashSet<PathBuf> = HashSet::new();
+    if let Some(files) = files {
+        for file in files {
+            let entry_path = if file.is_absolute() {
+                file.clone()
+            } else {
+                path.join(file)
+            };
+            if !processed.insert(entry_path.clone()) {
                 continue;
             }
-        };
-
-        if let Some(state) = file_state.as_deref_mut() {
-            if let Some((prev, _)) = state.get(&entry_path) {
-                if !truncate && *prev >= modified {
-                    info!("Skipping unchanged file: {}", entry_path.display());
+            let meta = match tokio::fs::metadata(&entry_path).await {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    warn!(
+                        "File {} provided for update does not exist.",
+                        entry_path.display()
+                    );
                     continue;
                 }
+                Err(err) => return Err(err.into()),
+            };
+            let modified = meta.modified()?;
+
+            let ext = entry_path.extension().and_then(|e| e.to_str());
+            let file_type = match ext {
+                Some("template") => DataFileType::Template,
+                Some("json") => DataFileType::Json,
+                Some("help") => DataFileType::Help,
+                _ => {
+                    continue;
+                }
+            };
+
+            if let Some(state) = file_state.as_deref_mut() {
+                if let Some((prev, _)) = state.get(&entry_path) {
+                    if *prev >= modified {
+                        info!("Skipping unchanged file: {}", entry_path.display());
+                        continue;
+                    } else {
+                        info!("Reloading modified file: {}", entry_path.display());
+                    }
+                } else {
+                    info!("Loading new file: {}", entry_path.display());
+                }
+                state.insert(entry_path.clone(), (modified, file_type));
+            }
+
+            let contents = tokio::fs::read_to_string(&entry_path).await?;
+            match file_type {
+                DataFileType::Template => {
+                    load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    template_count += 1;
+                }
+                DataFileType::Json => {
+                    load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    json_count += 1;
+                }
+                DataFileType::Help => {
+                    let file_name = entry_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    load_srvhelp(
+                        &contents,
+                        &entry_path.to_string_lossy(),
+                        &file_name,
+                        &mut tx,
+                    )
+                    .await?;
+                    srvhelp_count += 1;
+                }
+            }
+        }
+    } else {
+        let mut entries = tokio::fs::read_dir(path).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let meta = tokio::fs::metadata(&entry_path).await?;
+            let modified = meta.modified()?;
+            if let Some(current) = current.as_mut() {
+                current.insert(entry_path.clone());
+            }
+
+            let ext = entry_path.extension().and_then(|e| e.to_str());
+            let file_type = match ext {
+                Some("template") => DataFileType::Template,
+                Some("json") => DataFileType::Json,
+                Some("help") => DataFileType::Help,
+                _ => {
+                    continue;
+                }
+            };
+
+            if let Some(state) = file_state.as_deref_mut() {
                 if truncate {
                     info!("Loading new file: {}", entry_path.display());
+                } else if let Some((prev, _)) = state.get(&entry_path) {
+                    if *prev >= modified {
+                        info!("Skipping unchanged file: {}", entry_path.display());
+                        continue;
+                    } else {
+                        info!("Reloading modified file: {}", entry_path.display());
+                    }
                 } else {
-                    info!("Reloading modified file: {}", entry_path.display());
+                    info!("Loading new file: {}", entry_path.display());
                 }
-            } else {
-                info!("Loading new file: {}", entry_path.display());
+                state.insert(entry_path.clone(), (modified, file_type));
             }
-            state.insert(entry_path.clone(), (modified, file_type));
-        }
 
-        let contents = tokio::fs::read_to_string(&entry_path).await?;
-        match file_type {
-            DataFileType::Template => {
-                load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-                template_count += 1;
-            }
-            DataFileType::Json => {
-                load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-                json_count += 1;
-            }
-            DataFileType::Help => {
-                load_srvhelp(
-                    &contents,
-                    &entry_path.to_string_lossy(),
-                    &entry.file_name().to_string_lossy(),
-                    &mut tx,
-                )
-                .await?;
-                srvhelp_count += 1;
+            let contents = tokio::fs::read_to_string(&entry_path).await?;
+            match file_type {
+                DataFileType::Template => {
+                    load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    template_count += 1;
+                }
+                DataFileType::Json => {
+                    load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    json_count += 1;
+                }
+                DataFileType::Help => {
+                    load_srvhelp(
+                        &contents,
+                        &entry_path.to_string_lossy(),
+                        &entry.file_name().to_string_lossy(),
+                        &mut tx,
+                    )
+                    .await?;
+                    srvhelp_count += 1;
+                }
             }
         }
     }
 
     if truncate {
-        if let Some(state) = file_state.as_deref_mut() {
+        if let (Some(state), Some(current)) = (file_state.as_deref_mut(), current) {
             state.retain(|p, _| {
                 let keep = current.contains(p);
                 if !keep {
@@ -455,6 +535,7 @@ pub(crate) async fn reload_data(
 ) -> Result<(), RdapServerError> {
     let update_path = PathBuf::from(&config.data_dir);
     let update_path = update_path.join(UPDATE);
+    let update_list_path = PathBuf::from(&config.data_dir).join(UPDATE_LIST);
     let reload_path = PathBuf::from(&config.data_dir);
     let reload_path = reload_path.join(RELOAD);
     let mut last_time = SystemTime::now();
@@ -466,7 +547,53 @@ pub(crate) async fn reload_data(
             if modified > last_time {
                 last_time = modified;
                 info!("Data being updated.");
-                load_data(&config, &*store, false, Some(&mut file_state)).await?;
+                let mut update_list_modified = None;
+                let mut update_files: Option<Vec<PathBuf>> = None;
+                match tokio::fs::metadata(&update_list_path).await {
+                    Ok(list_meta) => {
+                        update_list_modified = Some(list_meta.modified()?);
+                        let contents = tokio::fs::read_to_string(&update_list_path).await?;
+                        let files: Vec<PathBuf> = contents
+                            .lines()
+                            .filter_map(|line| {
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(PathBuf::from(trimmed))
+                                }
+                            })
+                            .collect();
+                        if !files.is_empty() {
+                            update_files = Some(files);
+                        }
+                    }
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+                if let Some(files) = update_files.as_ref() {
+                    load_data(
+                        &config,
+                        &*store,
+                        false,
+                        Some(&mut file_state),
+                        Some(files.as_slice()),
+                    )
+                    .await?;
+                } else {
+                    load_data(&config, &*store, false, Some(&mut file_state), None).await?;
+                }
+                if let Some(original_modified) = update_list_modified {
+                    match tokio::fs::metadata(&update_list_path).await {
+                        Ok(list_meta) => {
+                            if list_meta.modified()? <= original_modified {
+                                let _ = tokio::fs::remove_file(&update_list_path).await;
+                            }
+                        }
+                        Err(err) if err.kind() == ErrorKind::NotFound => {}
+                        Err(err) => return Err(err.into()),
+                    }
+                }
             }
         };
         let reload_meta = tokio::fs::metadata(&reload_path).await;
@@ -475,10 +602,57 @@ pub(crate) async fn reload_data(
             if modified > last_time {
                 last_time = modified;
                 info!("Data being reloaded.");
-                load_data(&config, &*store, false, Some(&mut file_state)).await?;
+                load_data(&config, &*store, true, Some(&mut file_state), None).await?;
             }
         };
     }
+}
+
+pub async fn trigger_update_files(
+    data_dir: &str,
+    files: &[PathBuf],
+) -> Result<(), RdapServerError> {
+    if files.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "No files provided for partial update.".to_string(),
+        ));
+    }
+    let data_path = PathBuf::from(data_dir);
+    let canonical_data_path = tokio::fs::canonicalize(&data_path)
+        .await
+        .unwrap_or_else(|_| data_path.clone());
+    let mut relative_files: Vec<PathBuf> = Vec::with_capacity(files.len());
+    for file in files {
+        let absolute = if file.is_absolute() {
+            file.clone()
+        } else {
+            data_path.join(file)
+        };
+        let canonical_file = tokio::fs::canonicalize(&absolute).await?;
+        if !canonical_file.starts_with(&canonical_data_path) {
+            return Err(RdapServerError::InvalidArg(format!(
+                "File {} is outside of data directory {}",
+                canonical_file.display(),
+                canonical_data_path.display()
+            )));
+        }
+        let relative = canonical_file
+            .strip_prefix(&canonical_data_path)
+            .unwrap_or(&canonical_file)
+            .to_path_buf();
+        relative_files.push(relative);
+    }
+    let update_list_path = data_path.join(UPDATE_LIST);
+    let mut contents = String::new();
+    for file in relative_files {
+        if !contents.is_empty() {
+            contents.push('\n');
+        }
+        contents.push_str(&file.to_string_lossy());
+    }
+    tokio::fs::write(&update_list_path, contents).await?;
+    trigger_update(data_dir).await?;
+    Ok(())
 }
 
 pub async fn trigger_reload(data_dir: &str) -> Result<(), RdapServerError> {
@@ -691,11 +865,13 @@ mod tests {
                     .build()
                     .expect("cidr parsing"),
             )),
-            ids: vec![NetworkId::builder()
-                .network_id(NetworkIdType::Cidr(
-                    "10.0.0.0/24".parse().expect("ipnet parsing"),
-                ))
-                .build()],
+            ids: vec![
+                NetworkId::builder()
+                    .network_id(NetworkIdType::Cidr(
+                        "10.0.0.0/24".parse().expect("ipnet parsing"),
+                    ))
+                    .build(),
+            ],
         };
 
         // WHEN
@@ -733,12 +909,14 @@ mod tests {
                     .build()
                     .expect("cidr parsing"),
             )),
-            ids: vec![NetworkId::builder()
-                .network_id(NetworkIdType::Range {
-                    start_address: "10.0.0.0".to_string(),
-                    end_address: "10.0.0.255".to_string(),
-                })
-                .build()],
+            ids: vec![
+                NetworkId::builder()
+                    .network_id(NetworkIdType::Range {
+                        start_address: "10.0.0.0".to_string(),
+                        end_address: "10.0.0.255".to_string(),
+                    })
+                    .build(),
+            ],
         };
 
         // WHEN
@@ -801,11 +979,13 @@ mod tests {
                     .build()
                     .expect("cidr parsing"),
             )),
-            ids: vec![NetworkId::builder()
-                .network_id(NetworkIdType::Cidr(
-                    "10.0.0.0/24".parse().expect("ipnet parsing"),
-                ))
-                .build()],
+            ids: vec![
+                NetworkId::builder()
+                    .network_id(NetworkIdType::Cidr(
+                        "10.0.0.0/24".parse().expect("ipnet parsing"),
+                    ))
+                    .build(),
+            ],
         };
         assert_eq!(actual, expected);
     }
@@ -845,12 +1025,14 @@ mod tests {
                     .build()
                     .expect("cidr parsing"),
             )),
-            ids: vec![NetworkId::builder()
-                .network_id(NetworkIdType::Range {
-                    start_address: "10.0.0.0".to_string(),
-                    end_address: "10.0.0.255".to_string(),
-                })
-                .build()],
+            ids: vec![
+                NetworkId::builder()
+                    .network_id(NetworkIdType::Range {
+                        start_address: "10.0.0.0".to_string(),
+                        end_address: "10.0.0.255".to_string(),
+                    })
+                    .build(),
+            ],
         };
         assert_eq!(actual, expected);
     }

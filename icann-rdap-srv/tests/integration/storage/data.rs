@@ -10,17 +10,19 @@ use {
     icann_rdap_srv::{
         config::{ServiceConfig, StorageType},
         storage::{
+            CommonConfig, StoreOps,
             data::{
-                load_data, AutnumId, AutnumOrError::AutnumObject, DomainId, DomainOrError,
+                AutnumId, AutnumOrError::AutnumObject, DataFileType, DomainId, DomainOrError,
                 EntityId, EntityOrError::EntityObject, NameserverId,
                 NameserverOrError::NameserverObject, NetworkId, NetworkIdType,
-                NetworkOrError::NetworkObject, Template,
+                NetworkOrError::NetworkObject, Template, load_data,
             },
             mem::{config::MemConfig, ops::Mem},
-            CommonConfig, StoreOps,
         },
     },
+    std::{collections::HashMap, path::PathBuf, time::Duration},
     test_dir::{DirBuilder, TestDir},
+    tokio::time::sleep,
 };
 
 async fn new_and_init_mem(data_dir: String) -> Mem {
@@ -37,6 +39,7 @@ async fn new_and_init_mem(data_dir: String) -> Mem {
             .expect("building service config"),
         &mem,
         false,
+        None,
         None,
     )
     .await
@@ -258,6 +261,88 @@ async fn GIVEN_data_dir_with_nameserver_template_WHEN_mem_init_THEN_nameservers_
         };
         assert_eq!(nameserver.ldh_name.as_ref().expect("ldhName is none"), ldh)
     }
+}
+
+#[tokio::test]
+async fn GIVEN_tracked_state_WHEN_partial_update_requested_THEN_only_listed_files_reload() {
+    // GIVEN
+    let temp = TestDir::temp();
+    let domain_foo = Domain::builder().ldh_name("foo.example").build();
+    let domain_bar = Domain::builder().ldh_name("bar.example").build();
+    let foo_path = temp.path("foo_example.json");
+    let bar_path = temp.path("bar_example.json");
+    std::fs::write(
+        &foo_path,
+        serde_json::to_string(&domain_foo).expect("serializing foo domain"),
+    )
+    .expect("writing foo domain");
+    std::fs::write(
+        &bar_path,
+        serde_json::to_string(&domain_bar).expect("serializing bar domain"),
+    )
+    .expect("writing bar domain");
+
+    let mem_config = MemConfig::builder()
+        .common_config(CommonConfig::default())
+        .build();
+    let mem = Mem::new(mem_config.clone());
+    mem.init().await.expect("initializing memory");
+    let service_config = ServiceConfig::non_server()
+        .data_dir(temp.root().to_string_lossy().to_string())
+        .storage_type(StorageType::Memory(mem_config))
+        .build()
+        .expect("building service config");
+    let mut state: HashMap<PathBuf, (std::time::SystemTime, DataFileType)> = HashMap::new();
+    load_data(&service_config, &mem, false, Some(&mut state), None)
+        .await
+        .expect("initial load");
+
+    // WHEN
+    sleep(Duration::from_millis(10)).await;
+    let domain_foo_updated = Domain::builder()
+        .ldh_name("foo.example")
+        .unicode_name("fóo.example")
+        .build();
+    std::fs::write(
+        &foo_path,
+        serde_json::to_string(&domain_foo_updated).expect("serializing updated domain"),
+    )
+    .expect("writing updated domain");
+    let update_files = vec![PathBuf::from("foo_example.json")];
+    load_data(
+        &service_config,
+        &mem,
+        false,
+        Some(&mut state),
+        Some(update_files.as_slice()),
+    )
+    .await
+    .expect("partial update");
+
+    // THEN
+    let RdapResponse::Domain(foo_domain) = mem
+        .get_domain_by_ldh("foo.example")
+        .await
+        .expect("fetching foo.example")
+    else {
+        panic!("foo.example should be a domain response");
+    };
+    assert_eq!(
+        foo_domain
+            .unicode_name
+            .as_ref()
+            .expect("unicode name missing after update"),
+        "fóo.example"
+    );
+
+    let RdapResponse::Domain(bar_domain) = mem
+        .get_domain_by_ldh("bar.example")
+        .await
+        .expect("fetching bar.example")
+    else {
+        panic!("bar.example should be a domain response");
+    };
+    assert!(bar_domain.unicode_name.is_none());
 }
 
 #[tokio::test]

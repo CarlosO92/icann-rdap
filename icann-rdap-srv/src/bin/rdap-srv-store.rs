@@ -3,25 +3,25 @@ use std::{net::IpAddr, path::PathBuf};
 use {
     clap::Parser,
     icann_rdap_common::{
+        VERSION,
         check::CheckClass,
         prelude::{Numberish, ToResponse},
         response::RdapResponse,
-        VERSION,
     },
     icann_rdap_srv::{
-        config::{data_dir, debug_config_vars, LOG},
+        config::{LOG, data_dir, debug_config_vars},
         error::RdapServerError,
         storage::data::{
-            trigger_reload, trigger_update, AutnumOrError, DomainOrError, EntityOrError,
-            NameserverOrError, NetworkIdType, NetworkOrError, Template,
+            AutnumOrError, DomainOrError, EntityOrError, NameserverOrError, NetworkIdType,
+            NetworkOrError, Template, trigger_reload, trigger_update, trigger_update_files,
         },
-        util::bin::check::{check_rdap, to_check_classes, CheckArgs},
+        util::bin::check::{CheckArgs, check_rdap, to_check_classes},
     },
     ipnet::IpNet,
     serde_json::Value,
     tracing::{debug, error, warn},
     tracing_subscriber::{
-        fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
+        EnvFilter, fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
     },
 };
 
@@ -42,6 +42,17 @@ struct Cli {
     /// If true, storage is updated.
     #[arg(long, required = false, conflicts_with = "reload")]
     update: bool,
+
+    /// Update storage with specific files.
+    ///
+    /// Only the provided files will be reprocessed by the running server.
+    #[arg(
+        long = "update-file",
+        value_name = "FILE",
+        num_args = 1..,
+        conflicts_with_all = ["reload", "update"]
+    )]
+    update_files: Vec<PathBuf>,
 
     /// Reload storage.
     ///
@@ -77,6 +88,8 @@ async fn main() -> Result<(), RdapServerError> {
     // signal update or reload
     if cli.reload {
         trigger_reload(&data_dir).await?;
+    } else if !cli.update_files.is_empty() {
+        trigger_update_files(&data_dir, &cli.update_files).await?;
     } else if cli.update {
         trigger_update(&data_dir).await?;
     };

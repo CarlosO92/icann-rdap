@@ -4,6 +4,7 @@ use {
     clap::{Args, Parser, Subcommand},
     icann_rdap_client::rdap::QueryType,
     icann_rdap_common::{
+        VERSION,
         contact::{Contact, PostalAddress},
         media_types::RDAP_MEDIA_TYPE,
         prelude::{RdapResponse, ToNotices, ToRemarks, ToResponse, VectorStringish},
@@ -11,28 +12,26 @@ use {
             Autnum, Domain, DsDatum, Entity, Event, Events, Help, Link, Links, Nameserver, Network,
             Notice, NoticeOrRemark, Rfc9083Error, SecureDns, ToChild,
         },
-        VERSION,
     },
     icann_rdap_srv::{
-        config::{debug_config_vars, ServiceConfig, LOG},
+        config::{LOG, ServiceConfig, debug_config_vars},
         error::RdapServerError,
         storage::{
+            CommonConfig, StoreOps,
             data::{
-                load_data, AutnumId, AutnumOrError, DomainId, DomainOrError, EntityId,
-                EntityOrError, NameserverId, NameserverOrError, NetworkId, NetworkOrError,
-                Template,
+                AutnumId, AutnumOrError, DomainId, DomainOrError, EntityId, EntityOrError,
+                NameserverId, NameserverOrError, NetworkId, NetworkOrError, Template, load_data,
             },
             mem::{config::MemConfig, ops::Mem},
-            CommonConfig, StoreOps,
         },
-        util::bin::check::{check_rdap, to_check_classes, CheckArgs},
+        util::bin::check::{CheckArgs, check_rdap, to_check_classes},
     },
     pct_str::{PctString, URIReserved},
     regex::Regex,
     std::{fs, path::PathBuf, str::FromStr},
     tracing::{error, info},
     tracing_subscriber::{
-        fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
+        EnvFilter, fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
     },
 };
 
@@ -176,12 +175,14 @@ fn parse_notice_or_remark(arg: &str) -> Result<NoticeOrRemark, RdapServerError> 
                 "unable to parse link href in Notice/Remark".to_string(),
             ));
         };
-        links = vec![Link::builder()
-            .media_type(link_type.as_str().to_string())
-            .href(link_href.as_str().to_string())
-            .value(link_href.as_str().to_string())
-            .rel(link_rel.as_str().to_string())
-            .build()];
+        links = vec![
+            Link::builder()
+                .media_type(link_type.as_str().to_string())
+                .href(link_href.as_str().to_string())
+                .value(link_href.as_str().to_string())
+                .rel(link_rel.as_str().to_string())
+                .build(),
+        ];
     }
     let not_rem = NoticeOrRemark::builder()
         .description(vec![description.as_str().to_string()])
@@ -499,7 +500,7 @@ async fn main() -> Result<(), RdapServerError> {
             .build(),
     );
     storage.init().await?;
-    load_data(&config, &storage, false, None).await?;
+    load_data(&config, &storage, false, None, None).await?;
 
     let work = do_the_work(cli, &storage, &data_dir).await;
     match work {
@@ -613,12 +614,14 @@ fn create_redirect_file(
         .notice(Notice(
             NoticeOrRemark::builder()
                 .title("Temporary Redirect")
-                .links(vec![Link::builder()
-                    .href(url)
-                    .value(self_href)
-                    .media_type(RDAP_MEDIA_TYPE)
-                    .rel("related")
-                    .build()])
+                .links(vec![
+                    Link::builder()
+                        .href(url)
+                        .value(self_href)
+                        .media_type(RDAP_MEDIA_TYPE)
+                        .rel("related")
+                        .build(),
+                ])
                 .build(),
         ))
         .build();
@@ -1135,11 +1138,13 @@ mod tests {
         let actual = parse_notice_or_remark(&arg).expect("parsing notice");
 
         // THEN
-        assert!(actual
-            .description
-            .expect("no description!")
-            .into_vec()
-            .contains(&description.to_string()));
+        assert!(
+            actual
+                .description
+                .expect("no description!")
+                .into_vec()
+                .contains(&description.to_string())
+        );
         let Some(links) = actual.links else {
             panic!("no links in notice")
         };
