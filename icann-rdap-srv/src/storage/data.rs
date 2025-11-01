@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     io::ErrorKind,
     net::IpAddr,
     path::PathBuf,
@@ -173,7 +174,6 @@ pub enum NetworkIdType {
 /// ```
 /// In this example, 2 domains will be created for "foo.example" and "bar.exaple" using
 /// the template.
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DataFileType {

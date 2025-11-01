@@ -4,7 +4,7 @@ use {
     clap::{Args, Parser, Subcommand},
     icann_rdap_client::rdap::QueryType,
     icann_rdap_common::{
-        VERSION,
+        check::StringCheck,
         contact::{Contact, PostalAddress},
         media_types::RDAP_MEDIA_TYPE,
         prelude::{RdapResponse, ToNotices, ToRemarks, ToResponse, VectorStringish},
@@ -12,26 +12,28 @@ use {
             Autnum, Domain, DsDatum, Entity, Event, Events, Help, Link, Links, Nameserver, Network,
             Notice, NoticeOrRemark, Rfc9083Error, SecureDns, ToChild,
         },
+        VERSION,
     },
     icann_rdap_srv::{
-        config::{LOG, ServiceConfig, debug_config_vars},
+        config::{debug_config_vars, ServiceConfig, LOG},
         error::RdapServerError,
         storage::{
-            CommonConfig, StoreOps,
             data::{
-                AutnumId, AutnumOrError, DomainId, DomainOrError, EntityId, EntityOrError,
-                NameserverId, NameserverOrError, NetworkId, NetworkOrError, Template, load_data,
+                load_data, AutnumId, AutnumOrError, DomainId, DomainOrError, EntityId,
+                EntityOrError, NameserverId, NameserverOrError, NetworkId, NetworkOrError,
+                Template,
             },
             mem::{config::MemConfig, ops::Mem},
+            CommonConfig, StoreOps,
         },
-        util::bin::check::{CheckArgs, check_rdap, to_check_classes},
+        util::bin::check::{check_rdap, to_check_classes, CheckArgs},
     },
     pct_str::{PctString, URIReserved},
     regex::Regex,
     std::{fs, path::PathBuf, str::FromStr},
     tracing::{error, info},
     tracing_subscriber::{
-        EnvFilter, fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
+        fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
     },
 };
 
@@ -175,14 +177,12 @@ fn parse_notice_or_remark(arg: &str) -> Result<NoticeOrRemark, RdapServerError> 
                 "unable to parse link href in Notice/Remark".to_string(),
             ));
         };
-        links = vec![
-            Link::builder()
-                .media_type(link_type.as_str().to_string())
-                .href(link_href.as_str().to_string())
-                .value(link_href.as_str().to_string())
-                .rel(link_rel.as_str().to_string())
-                .build(),
-        ];
+        links = vec![Link::builder()
+            .media_type(link_type.as_str().to_string())
+            .href(link_href.as_str().to_string())
+            .value(link_href.as_str().to_string())
+            .rel(link_rel.as_str().to_string())
+            .build()];
     }
     let not_rem = NoticeOrRemark::builder()
         .description(vec![description.as_str().to_string()])
@@ -334,7 +334,7 @@ struct DomainArgs {
     #[arg(long)]
     handle: Option<String>,
 
-    /// Letters-Digits-Hyphen name.
+    /// Letters-Digits-Hyphen name. May optionally end with a trailing dot.
     #[arg(long)]
     ldh: Option<String>,
 
@@ -396,6 +396,26 @@ fn parse_ds_datum(arg: &str) -> Result<DsDatum, RdapServerError> {
     Ok(ds_datum)
 }
 
+fn normalize_ldh_name(ldh: &str) -> Result<String, RdapServerError> {
+    let trimmed = ldh.trim();
+    if trimmed.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "LDH domain name must not be empty.".to_string(),
+        ));
+    }
+    let without_dot = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    if without_dot.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "LDH domain name must contain at least one label.".to_string(),
+        ));
+    }
+    if !without_dot.is_ldh_domain_name() {
+        return Err(RdapServerError::InvalidArg(format!(
+            "Invalid LDH domain name: {ldh}",
+        )));
+    }
+    Ok(without_dot.to_string())
+}
 #[derive(Debug, Args)]
 struct AutnumArgs {
     #[clap(flatten)]
@@ -614,14 +634,12 @@ fn create_redirect_file(
         .notice(Notice(
             NoticeOrRemark::builder()
                 .title("Temporary Redirect")
-                .links(vec![
-                    Link::builder()
-                        .href(url)
-                        .value(self_href)
-                        .media_type(RDAP_MEDIA_TYPE)
-                        .rel("related")
-                        .build(),
-                ])
+                .links(vec![Link::builder()
+                    .href(url)
+                    .value(self_href)
+                    .media_type(RDAP_MEDIA_TYPE)
+                    .rel("related")
+                    .build()])
                 .build(),
         ))
         .build();
@@ -939,16 +957,16 @@ async fn make_domain(
 ) -> Result<Output, RdapServerError> {
     // get ldh from idn u-label if ldh is not given
     let ldh = if let Some(ldh_arg) = args.ldh.as_ref() {
-        ldh_arg.to_owned()
+        normalize_ldh_name(ldh_arg)?
     } else if let Some(idn_arg) = args.idn.as_ref() {
-        idna::domain_to_ascii(idn_arg)
-            .map_err(|_| RdapServerError::InvalidArg("Invalid IDN U-Lable".to_string()))?
+        let ascii = idna::domain_to_ascii(idn_arg)
+            .map_err(|_| RdapServerError::InvalidArg("Invalid IDN U-Lable".to_string()))?;
+        normalize_ldh_name(&ascii)?
     } else {
         panic!("neither ldh or idn specified. this should have been caught in arg parsing.")
-    }
+    };
 
     // get unicodeName (idn) from ldh if idn is not given
-    ;
     let unicode_name = if let Some(idn_arg) = args.idn {
         idn_arg
     } else {
@@ -1141,13 +1159,11 @@ mod tests {
         let actual = parse_notice_or_remark(&arg).expect("parsing notice");
 
         // THEN
-        assert!(
-            actual
-                .description
-                .expect("no description!")
-                .into_vec()
-                .contains(&description.to_string())
-        );
+        assert!(actual
+            .description
+            .expect("no description!")
+            .into_vec()
+            .contains(&description.to_string()));
         let Some(links) = actual.links else {
             panic!("no links in notice")
         };

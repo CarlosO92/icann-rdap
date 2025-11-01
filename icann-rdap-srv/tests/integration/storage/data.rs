@@ -10,14 +10,14 @@ use {
     icann_rdap_srv::{
         config::{ServiceConfig, StorageType},
         storage::{
-            CommonConfig, StoreOps,
             data::{
-                AutnumId, AutnumOrError::AutnumObject, DataFileType, DomainId, DomainOrError,
-                EntityId, EntityOrError::EntityObject, NameserverId,
+                load_data, AutnumId, AutnumOrError::AutnumObject, DataFileType, DomainId,
+                DomainOrError, EntityId, EntityOrError::EntityObject, NameserverId,
                 NameserverOrError::NameserverObject, NetworkId, NetworkIdType,
-                NetworkOrError::NetworkObject, Template, load_data,
+                NetworkOrError::NetworkObject, Template,
             },
             mem::{config::MemConfig, ops::Mem},
+            CommonConfig, StoreOps,
         },
     },
     std::{collections::HashMap, path::PathBuf, time::Duration},

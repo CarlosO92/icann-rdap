@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use {
     async_trait::async_trait,
-    axum::{Router, error_handling::HandleErrorLayer},
+    axum::{error_handling::HandleErrorLayer, Router},
     http::{Method, StatusCode},
     icann_rdap_common::VERSION,
     tokio::net::TcpListener,
@@ -18,10 +18,10 @@ use crate::{
     error::RdapServerError,
     rdap::router::rdap_router,
     storage::{
-        StoreOps,
         data::{self, load_data, reload_data},
         mem::{config::MemConfig, ops::Mem},
         pg::{config::PgConfig, ops::Pg},
+        StoreOps,
     },
 };
 
