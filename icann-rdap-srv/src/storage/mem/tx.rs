@@ -21,6 +21,10 @@ use crate::{
 
 use super::{label_search::SearchLabels, ops::Mem};
 
+fn canonicalize_ldh_key(ldh: &str) -> String {
+    ldh.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 pub struct MemTx {
     mem: Mem,
     autnums: RangeMap<u32, Arc<RdapResponse>>,
@@ -111,8 +115,12 @@ impl TxHandle for MemTx {
             .ldh_name
             .as_ref()
             .ok_or_else(|| RdapServerError::EmptyIndexData("ldhName".to_string()))?;
+        let canonical_ldh = canonicalize_ldh_key(ldh_name);
+        if canonical_ldh.is_empty() {
+            return Err(RdapServerError::InvalidArg(ldh_name.to_owned()));
+        }
         self.domains
-            .insert(ldh_name.to_owned(), domain_response.clone());
+            .insert(canonical_ldh.clone(), domain_response.clone());
 
         // add the domain by unicodeName
         if let Some(unicode_name) = domain.unicode_name.as_ref() {
@@ -121,7 +129,8 @@ impl TxHandle for MemTx {
         };
 
         if self.mem.config.common_config.domain_search_by_name_enable {
-            self.domains_by_name.insert(ldh_name, domain_response);
+            self.domains_by_name
+                .insert(canonical_ldh.as_str(), domain_response);
         }
 
         Ok(())
@@ -132,10 +141,12 @@ impl TxHandle for MemTx {
         domain_id: &DomainId,
         error: &Rfc9083Error,
     ) -> Result<(), RdapServerError> {
-        self.domains.insert(
-            domain_id.ldh_name.to_owned(),
-            Arc::new(error.clone().to_response()),
-        );
+        let canonical_ldh = canonicalize_ldh_key(&domain_id.ldh_name);
+        if canonical_ldh.is_empty() {
+            return Err(RdapServerError::InvalidArg(domain_id.ldh_name.to_owned()));
+        }
+        self.domains
+            .insert(canonical_ldh, Arc::new(error.clone().to_response()));
         Ok(())
     }
 

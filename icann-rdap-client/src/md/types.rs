@@ -1,6 +1,5 @@
-use icann_rdap_common::response::Stringish;
 use {
-    icann_rdap_common::prelude::ObjectCommon,
+    icann_rdap_common::{prelude::ObjectCommon, response::Stringish},
     std::{any::TypeId, sync::LazyLock},
 };
 

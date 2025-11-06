@@ -1,9 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use {
     async_trait::async_trait,
     axum::{error_handling::HandleErrorLayer, Router},
     http::{Method, StatusCode},
     icann_rdap_common::VERSION,
+    std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration},
     tokio::net::TcpListener,
     tower::{BoxError, ServiceBuilder},
     tower_http::{
