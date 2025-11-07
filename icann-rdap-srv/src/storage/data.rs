@@ -182,11 +182,18 @@ pub enum DataFileType {
     Help,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DataFileState {
+    pub modified: SystemTime,
+    pub len: u64,
+    pub file_type: DataFileType,
+}
+
 pub async fn load_data(
     config: &ServiceConfig,
     store: &dyn StoreOps,
     truncate: bool,
-    mut file_state: Option<&mut HashMap<PathBuf, (SystemTime, DataFileType)>>,
+    mut file_state: Option<&mut HashMap<PathBuf, DataFileState>>,
     files: Option<&[PathBuf]>,
 ) -> Result<(), RdapServerError> {
     let mut json_count: usize = 0;
@@ -235,6 +242,7 @@ pub async fn load_data(
                 Err(err) => return Err(err.into()),
             };
             let modified = meta.modified()?;
+            let len = meta.len();
 
             let ext = entry_path.extension().and_then(|e| e.to_str());
             let file_type = match ext {
@@ -246,21 +254,17 @@ pub async fn load_data(
                 }
             };
 
-            if let Some(state) = file_state.as_deref_mut() {
-                if let Some((prev, _)) = state.get(&entry_path) {
-                    if *prev >= modified {
-                        info!("Skipping unchanged file: {}", entry_path.display());
-                        continue;
-                    } else {
-                        info!("Reloading modified file: {}", entry_path.display());
-                    }
-                } else {
-                    info!("Loading new file: {}", entry_path.display());
-                }
-                state.insert(entry_path.clone(), (modified, file_type));
+            if file_state
+                .as_deref()
+                .is_some_and(|state| state.contains_key(&entry_path))
+            {
+                info!("Reloading modified file: {}", entry_path.display());
+            } else {
+                info!("Loading new file: {}", entry_path.display());
             }
 
             let contents = tokio::fs::read_to_string(&entry_path).await?;
+
             match file_type {
                 DataFileType::Template => {
                     load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
@@ -285,6 +289,17 @@ pub async fn load_data(
                     srvhelp_count += 1;
                 }
             }
+
+            if let Some(state) = file_state.as_deref_mut() {
+                state.insert(
+                    entry_path.clone(),
+                    DataFileState {
+                        modified,
+                        len,
+                        file_type,
+                    },
+                );
+            }
         }
     } else {
         let mut entries = tokio::fs::read_dir(path).await?;
@@ -292,6 +307,7 @@ pub async fn load_data(
             let entry_path = entry.path();
             let meta = tokio::fs::metadata(&entry_path).await?;
             let modified = meta.modified()?;
+            let len = meta.len();
             if let Some(current) = current.as_mut() {
                 current.insert(entry_path.clone());
             }
@@ -306,11 +322,11 @@ pub async fn load_data(
                 }
             };
 
-            if let Some(state) = file_state.as_deref_mut() {
+            if let Some(state) = file_state.as_deref() {
                 if truncate {
                     info!("Loading new file: {}", entry_path.display());
-                } else if let Some((prev, _)) = state.get(&entry_path) {
-                    if *prev >= modified {
+                } else if let Some(prev) = state.get(&entry_path) {
+                    if prev.modified >= modified && prev.len == len {
                         info!("Skipping unchanged file: {}", entry_path.display());
                         continue;
                     } else {
@@ -319,10 +335,10 @@ pub async fn load_data(
                 } else {
                     info!("Loading new file: {}", entry_path.display());
                 }
-                state.insert(entry_path.clone(), (modified, file_type));
             }
 
             let contents = tokio::fs::read_to_string(&entry_path).await?;
+
             match file_type {
                 DataFileType::Template => {
                     load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
@@ -343,6 +359,17 @@ pub async fn load_data(
                     srvhelp_count += 1;
                 }
             }
+
+            if let Some(state) = file_state.as_deref_mut() {
+                state.insert(
+                    entry_path.clone(),
+                    DataFileState {
+                        modified,
+                        len,
+                        file_type,
+                    },
+                );
+            }
         }
     }
 
@@ -362,8 +389,8 @@ pub async fn load_data(
         let mut json_total = 0;
         let mut template_total = 0;
         let mut help_total = 0;
-        for (_, (_, ty)) in state.iter() {
-            match ty {
+        for entry in state.values() {
+            match entry.file_type {
                 DataFileType::Json => json_total += 1,
                 DataFileType::Template => template_total += 1,
                 DataFileType::Help => help_total += 1,
@@ -531,24 +558,26 @@ async fn load_rdap_template(
 pub(crate) async fn reload_data(
     store: Box<dyn StoreOps>,
     config: ServiceConfig,
-    mut file_state: HashMap<PathBuf, (SystemTime, DataFileType)>,
+    mut file_state: HashMap<PathBuf, DataFileState>,
 ) -> Result<(), RdapServerError> {
-    let update_path = PathBuf::from(&config.data_dir);
-    let update_path = update_path.join(UPDATE);
-    let update_list_path = PathBuf::from(&config.data_dir).join(UPDATE_LIST);
-    let reload_path = PathBuf::from(&config.data_dir);
-    let reload_path = reload_path.join(RELOAD);
-    let mut last_time = SystemTime::now();
+    let data_dir = PathBuf::from(&config.data_dir);
+    let update_path = data_dir.join(UPDATE);
+    let update_list_path = data_dir.join(UPDATE_LIST);
+    let reload_path = data_dir.join(RELOAD);
+    let mut last_update = SystemTime::UNIX_EPOCH;
+    let mut last_reload = SystemTime::UNIX_EPOCH;
+
     loop {
         sleep(Duration::from_millis(1000)).await;
-        let update_meta = tokio::fs::metadata(&update_path).await;
-        if update_meta.is_ok() {
-            let modified = update_meta.unwrap().modified()?;
-            if modified > last_time {
-                last_time = modified;
+
+        if let Ok(meta) = tokio::fs::metadata(&update_path).await {
+            let modified = meta.modified()?;
+            if modified > last_update {
+                last_update = modified;
                 info!("Data being updated.");
-                let mut update_list_modified = None;
+
                 let mut update_files: Option<Vec<PathBuf>> = None;
+                let mut update_list_modified = None;
                 match tokio::fs::metadata(&update_list_path).await {
                     Ok(list_meta) => {
                         update_list_modified = Some(list_meta.modified()?);
@@ -571,6 +600,7 @@ pub(crate) async fn reload_data(
                     Err(err) if err.kind() == ErrorKind::NotFound => {}
                     Err(err) => return Err(err.into()),
                 }
+
                 if let Some(files) = update_files.as_ref() {
                     load_data(
                         &config,
@@ -583,6 +613,23 @@ pub(crate) async fn reload_data(
                 } else {
                     load_data(&config, &*store, false, Some(&mut file_state), None).await?;
                 }
+
+                let mut update_removed = false;
+                match tokio::fs::remove_file(&update_path).await {
+                    Ok(()) => update_removed = true,
+                    Err(err) => {
+                        if err.kind() != ErrorKind::NotFound {
+                            warn!(
+                                "Unable to remove update flag {} after processing: {}",
+                                update_path.display(),
+                                err
+                            );
+                        } else {
+                            update_removed = true;
+                        }
+                    }
+                }
+
                 if let Some(original_modified) = update_list_modified {
                     match tokio::fs::metadata(&update_list_path).await {
                         Ok(list_meta) => {
@@ -594,17 +641,51 @@ pub(crate) async fn reload_data(
                         Err(err) => return Err(err.into()),
                     }
                 }
+
+                if update_removed {
+                    last_update = modified
+                        .checked_sub(Duration::from_nanos(1))
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                }
             }
-        };
-        let reload_meta = tokio::fs::metadata(&reload_path).await;
-        if reload_meta.is_ok() {
-            let modified = reload_meta.unwrap().modified()?;
-            if modified > last_time {
-                last_time = modified;
+        }
+
+        if let Ok(meta) = tokio::fs::metadata(&reload_path).await {
+            let modified = meta.modified()?;
+            if modified > last_reload {
                 info!("Data being reloaded.");
+
                 load_data(&config, &*store, true, Some(&mut file_state), None).await?;
+
+                let mut reload_removed = false;
+                match tokio::fs::remove_file(&reload_path).await {
+                    Ok(()) => reload_removed = true,
+                    Err(err) => {
+                        if err.kind() != ErrorKind::NotFound {
+                            warn!(
+                                "Unable to remove reload flag {} after processing: {}",
+                                reload_path.display(),
+                                err
+                            );
+                        } else {
+                            reload_removed = true;
+                        }
+                    }
+                }
+
+                if reload_removed {
+                    last_reload = modified
+                        .checked_sub(Duration::from_nanos(1))
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                } else {
+                    last_reload = modified;
+                }
+            } else if modified == last_reload {
+                // In case removing the reload flag failed and the timestamp didn't
+                // advance, keep the stored value to avoid tight looping.
+                last_reload = modified;
             }
-        };
+        }
     }
 }
 

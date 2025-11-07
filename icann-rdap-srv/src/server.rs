@@ -112,8 +112,7 @@ async fn init_data(
     store: Box<dyn StoreOps>,
     config: &ServiceConfig,
 ) -> Result<(), RdapServerError> {
-    let mut state: HashMap<std::path::PathBuf, (std::time::SystemTime, data::DataFileType)> =
-        HashMap::new();
+    let mut state: HashMap<std::path::PathBuf, data::DataFileState> = HashMap::new();
     load_data(config, &*store, false, Some(&mut state), None).await?;
     if config.auto_reload {
         tokio::spawn(reload_data(store, config.clone(), state));

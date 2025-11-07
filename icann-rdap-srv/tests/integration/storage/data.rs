@@ -11,8 +11,8 @@ use {
         config::{ServiceConfig, StorageType},
         storage::{
             data::{
-                load_data, AutnumId, AutnumOrError::AutnumObject, DataFileType, DomainId,
-                DomainOrError, EntityId, EntityOrError::EntityObject, NameserverId,
+                load_data, AutnumId, AutnumOrError::AutnumObject, DataFileState, DataFileType,
+                DomainId, DomainOrError, EntityId, EntityOrError::EntityObject, NameserverId,
                 NameserverOrError::NameserverObject, NetworkId, NetworkIdType,
                 NetworkOrError::NetworkObject, Template,
             },
@@ -292,7 +292,7 @@ async fn GIVEN_tracked_state_WHEN_partial_update_requested_THEN_only_listed_file
         .storage_type(StorageType::Memory(mem_config))
         .build()
         .expect("building service config");
-    let mut state: HashMap<PathBuf, (std::time::SystemTime, DataFileType)> = HashMap::new();
+    let mut state: HashMap<PathBuf, DataFileState> = HashMap::new();
     load_data(&service_config, &mem, false, Some(&mut state), None)
         .await
         .expect("initial load");
