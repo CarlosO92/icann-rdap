@@ -1,4 +1,5 @@
 use std::{
+    io::ErrorKind,
     net::IpAddr,
     path::PathBuf,
     time::{Duration, SystemTime},
@@ -28,6 +29,7 @@ use crate::{
 };
 
 pub const UPDATE: &str = "update";
+pub const UPDATE_LIST: &str = "update.list";
 pub const RELOAD: &str = "reload";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Display)]
@@ -171,10 +173,28 @@ pub enum NetworkIdType {
 /// ```
 /// In this example, 2 domains will be created for "foo.example" and "bar.exaple" using
 /// the template.
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DataFileType {
+    Json,
+    Template,
+    Help,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DataFileState {
+    pub modified: SystemTime,
+    pub len: u64,
+    pub file_type: DataFileType,
+}
+
 pub async fn load_data(
     config: &ServiceConfig,
     store: &dyn StoreOps,
     truncate: bool,
+    mut file_state: Option<&mut HashMap<PathBuf, DataFileState>>,
+    files: Option<&[PathBuf]>,
 ) -> Result<(), RdapServerError> {
     let mut json_count: usize = 0;
     let mut template_count: usize = 0;
@@ -193,33 +213,202 @@ pub async fn load_data(
         return Ok(());
     }
 
-    let mut entries = tokio::fs::read_dir(path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let entry_path = entry.path();
-        let contents = tokio::fs::read_to_string(&entry_path).await?;
-        if entry_path.extension().is_some_and(|ext| ext == "template") {
-            load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-            template_count += 1;
-        } else if entry_path.extension().is_some_and(|ext| ext == "json") {
-            load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-            json_count += 1;
-        } else if entry_path.extension().is_some_and(|ext| ext == "help") {
-            load_srvhelp(
-                &contents,
-                &entry_path.to_string_lossy(),
-                &entry.file_name().to_string_lossy(),
-                &mut tx,
-            )
-            .await?;
-            srvhelp_count += 1;
+    // When performing a full reload we keep the existing state until after all
+    // files have been processed so we can determine which files were removed
+    // from the directory. The state will be updated with the new modification
+    // times as we load each file and pruned at the end of the run.
+
+    let mut current = if truncate { Some(HashSet::new()) } else { None };
+    let mut processed: HashSet<PathBuf> = HashSet::new();
+    if let Some(files) = files {
+        for file in files {
+            let entry_path = if file.is_absolute() {
+                file.clone()
+            } else {
+                path.join(file)
+            };
+            if !processed.insert(entry_path.clone()) {
+                continue;
+            }
+            let meta = match tokio::fs::metadata(&entry_path).await {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    warn!(
+                        "File {} provided for update does not exist.",
+                        entry_path.display()
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let modified = meta.modified()?;
+            let len = meta.len();
+
+            let ext = entry_path.extension().and_then(|e| e.to_str());
+            let file_type = match ext {
+                Some("template") => DataFileType::Template,
+                Some("json") => DataFileType::Json,
+                Some("help") => DataFileType::Help,
+                _ => {
+                    continue;
+                }
+            };
+
+            if file_state
+                .as_deref()
+                .is_some_and(|state| state.contains_key(&entry_path))
+            {
+                info!("Reloading modified file: {}", entry_path.display());
+            } else {
+                info!("Loading new file: {}", entry_path.display());
+            }
+
+            let contents = tokio::fs::read_to_string(&entry_path).await?;
+
+            match file_type {
+                DataFileType::Template => {
+                    load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    template_count += 1;
+                }
+                DataFileType::Json => {
+                    load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    json_count += 1;
+                }
+                DataFileType::Help => {
+                    let file_name = entry_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    load_srvhelp(
+                        &contents,
+                        &entry_path.to_string_lossy(),
+                        &file_name,
+                        &mut tx,
+                    )
+                    .await?;
+                    srvhelp_count += 1;
+                }
+            }
+
+            if let Some(state) = file_state.as_deref_mut() {
+                state.insert(
+                    entry_path.clone(),
+                    DataFileState {
+                        modified,
+                        len,
+                        file_type,
+                    },
+                );
+            }
+        }
+    } else {
+        let mut entries = tokio::fs::read_dir(path).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let meta = tokio::fs::metadata(&entry_path).await?;
+            let modified = meta.modified()?;
+            let len = meta.len();
+            if let Some(current) = current.as_mut() {
+                current.insert(entry_path.clone());
+            }
+
+            let ext = entry_path.extension().and_then(|e| e.to_str());
+            let file_type = match ext {
+                Some("template") => DataFileType::Template,
+                Some("json") => DataFileType::Json,
+                Some("help") => DataFileType::Help,
+                _ => {
+                    continue;
+                }
+            };
+
+            if let Some(state) = file_state.as_deref() {
+                if truncate {
+                    info!("Loading new file: {}", entry_path.display());
+                } else if let Some(prev) = state.get(&entry_path) {
+                    if prev.modified >= modified && prev.len == len {
+                        info!("Skipping unchanged file: {}", entry_path.display());
+                        continue;
+                    } else {
+                        info!("Reloading modified file: {}", entry_path.display());
+                    }
+                } else {
+                    info!("Loading new file: {}", entry_path.display());
+                }
+            }
+
+            let contents = tokio::fs::read_to_string(&entry_path).await?;
+
+            match file_type {
+                DataFileType::Template => {
+                    load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    template_count += 1;
+                }
+                DataFileType::Json => {
+                    load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
+                    json_count += 1;
+                }
+                DataFileType::Help => {
+                    load_srvhelp(
+                        &contents,
+                        &entry_path.to_string_lossy(),
+                        &entry.file_name().to_string_lossy(),
+                        &mut tx,
+                    )
+                    .await?;
+                    srvhelp_count += 1;
+                }
+            }
+
+            if let Some(state) = file_state.as_deref_mut() {
+                state.insert(
+                    entry_path.clone(),
+                    DataFileState {
+                        modified,
+                        len,
+                        file_type,
+                    },
+                );
+            }
         }
     }
 
-    info!("{json_count} RDAP JSON files loaded.");
-    info!("{template_count} RDAP template files loaded.");
-    info!("{srvhelp_count} RDAP server help files loaded.");
-    if json_count == 0 && template_count == 0 && srvhelp_count == 0 {
-        warn!("No data loaded. Server has no content to serve.");
+    if truncate {
+        if let (Some(state), Some(current)) = (file_state.as_deref_mut(), current) {
+            state.retain(|p, _| {
+                let keep = current.contains(p);
+                if !keep {
+                    info!("Removing deleted file from cache: {}", p.display());
+                }
+                keep
+            });
+        }
+    }
+
+    if let Some(state) = file_state.as_deref() {
+        let mut json_total = 0;
+        let mut template_total = 0;
+        let mut help_total = 0;
+        for entry in state.values() {
+            match entry.file_type {
+                DataFileType::Json => json_total += 1,
+                DataFileType::Template => template_total += 1,
+                DataFileType::Help => help_total += 1,
+            }
+        }
+        info!("{json_total} RDAP JSON files loaded.");
+        info!("{template_total} RDAP template files loaded.");
+        info!("{help_total} RDAP server help files loaded.");
+        if json_total == 0 && template_total == 0 && help_total == 0 {
+            warn!("No data loaded. Server has no content to serve.");
+        }
+    } else {
+        info!("{json_count} RDAP JSON files loaded.");
+        info!("{template_count} RDAP template files loaded.");
+        info!("{srvhelp_count} RDAP server help files loaded.");
+        if json_count == 0 && template_count == 0 && srvhelp_count == 0 {
+            warn!("No data loaded. Server has no content to serve.");
+        }
     }
     tx.commit().await?;
     Ok(())
@@ -369,33 +558,180 @@ async fn load_rdap_template(
 pub(crate) async fn reload_data(
     store: Box<dyn StoreOps>,
     config: ServiceConfig,
+    mut file_state: HashMap<PathBuf, DataFileState>,
 ) -> Result<(), RdapServerError> {
-    let update_path = PathBuf::from(&config.data_dir);
-    let update_path = update_path.join(UPDATE);
-    let reload_path = PathBuf::from(&config.data_dir);
-    let reload_path = reload_path.join(RELOAD);
-    let mut last_time = SystemTime::now();
+    let data_dir = PathBuf::from(&config.data_dir);
+    let update_path = data_dir.join(UPDATE);
+    let update_list_path = data_dir.join(UPDATE_LIST);
+    let reload_path = data_dir.join(RELOAD);
+    let mut last_update = SystemTime::UNIX_EPOCH;
+    let mut last_reload = SystemTime::UNIX_EPOCH;
+
     loop {
         sleep(Duration::from_millis(1000)).await;
-        let update_meta = tokio::fs::metadata(&update_path).await;
-        if update_meta.is_ok() {
-            let modified = update_meta.unwrap().modified()?;
-            if modified > last_time {
-                last_time = modified;
+        if let Ok(meta) = tokio::fs::metadata(&update_path).await {
+            let modified = meta.modified()?;
+            if modified > last_update {
+                last_update = modified;
                 info!("Data being updated.");
-                load_data(&config, &*store, false).await?;
+
+                let mut update_files: Option<Vec<PathBuf>> = None;
+                let mut update_list_modified = None;
+                match tokio::fs::metadata(&update_list_path).await {
+                    Ok(list_meta) => {
+                        update_list_modified = Some(list_meta.modified()?);
+                        let contents = tokio::fs::read_to_string(&update_list_path).await?;
+                        let files: Vec<PathBuf> = contents
+                            .lines()
+                            .filter_map(|line| {
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(PathBuf::from(trimmed))
+                                }
+                            })
+                            .collect();
+                        if !files.is_empty() {
+                            update_files = Some(files);
+                        }
+                    }
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+
+                if let Some(files) = update_files.as_ref() {
+                    load_data(
+                        &config,
+                        &*store,
+                        false,
+                        Some(&mut file_state),
+                        Some(files.as_slice()),
+                    )
+                    .await?;
+                } else {
+                    load_data(&config, &*store, false, Some(&mut file_state), None).await?;
+                }
+
+                let mut update_removed = false;
+                match tokio::fs::remove_file(&update_path).await {
+                    Ok(()) => update_removed = true,
+                    Err(err) => {
+                        if err.kind() != ErrorKind::NotFound {
+                            warn!(
+                                "Unable to remove update flag {} after processing: {}",
+                                update_path.display(),
+                                err
+                            );
+                        } else {
+                            update_removed = true;
+                        }
+                    }
+                }
+
+                if let Some(original_modified) = update_list_modified {
+                    match tokio::fs::metadata(&update_list_path).await {
+                        Ok(list_meta) => {
+                            if list_meta.modified()? <= original_modified {
+                                let _ = tokio::fs::remove_file(&update_list_path).await;
+                            }
+                        }
+                        Err(err) if err.kind() == ErrorKind::NotFound => {}
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+
+                if update_removed {
+                    last_update = modified
+                        .checked_sub(Duration::from_nanos(1))
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                }
             }
-        };
-        let reload_meta = tokio::fs::metadata(&reload_path).await;
-        if reload_meta.is_ok() {
-            let modified = reload_meta.unwrap().modified()?;
-            if modified > last_time {
-                last_time = modified;
+        }
+
+        if let Ok(meta) = tokio::fs::metadata(&reload_path).await {
+            let modified = meta.modified()?;
+            if modified > last_reload {
                 info!("Data being reloaded.");
-                load_data(&config, &*store, true).await?;
+                load_data(&config, &*store, true, Some(&mut file_state), None).await?;
+
+                let mut reload_removed = false;
+                match tokio::fs::remove_file(&reload_path).await {
+                    Ok(()) => reload_removed = true,
+                    Err(err) => {
+                        if err.kind() != ErrorKind::NotFound {
+                            warn!(
+                                "Unable to remove reload flag {} after processing: {}",
+                                reload_path.display(),
+                                err
+                            );
+                        } else {
+                            reload_removed = true;
+                        }
+                    }
+                }
+
+                if reload_removed {
+                    last_reload = modified
+                        .checked_sub(Duration::from_nanos(1))
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                } else {
+                    last_reload = modified;
+                }
+            } else if modified == last_reload {
+                // In case removing the reload flag failed and the timestamp didn't
+                // advance, keep the stored value to avoid tight looping.
+                last_reload = modified;
             }
-        };
+        }
     }
+}
+
+pub async fn trigger_update_files(
+    data_dir: &str,
+    files: &[PathBuf],
+) -> Result<(), RdapServerError> {
+    if files.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "No files provided for partial update.".to_string(),
+        ));
+    }
+    let data_path = PathBuf::from(data_dir);
+    let canonical_data_path = tokio::fs::canonicalize(&data_path)
+        .await
+        .unwrap_or_else(|_| data_path.clone());
+    let mut relative_files: Vec<PathBuf> = Vec::with_capacity(files.len());
+    for file in files {
+        let absolute = if file.is_absolute() {
+            file.clone()
+        } else {
+            data_path.join(file)
+        };
+        let canonical_file = tokio::fs::canonicalize(&absolute).await?;
+        if !canonical_file.starts_with(&canonical_data_path) {
+            return Err(RdapServerError::InvalidArg(format!(
+                "File {} is outside of data directory {}",
+                canonical_file.display(),
+                canonical_data_path.display()
+            )));
+        }
+        let relative = canonical_file
+            .strip_prefix(&canonical_data_path)
+            .unwrap_or(&canonical_file)
+            .to_path_buf();
+        relative_files.push(relative);
+    }
+    let update_list_path = data_path.join(UPDATE_LIST);
+    let mut contents = String::new();
+    for file in relative_files {
+        if !contents.is_empty() {
+            contents.push('\n');
+        }
+        contents.push_str(&file.to_string_lossy());
+    }
+    tokio::fs::write(&update_list_path, contents).await?;
+    trigger_update(data_dir).await?;
+    Ok(())
 }
 
 pub async fn trigger_reload(data_dir: &str) -> Result<(), RdapServerError> {

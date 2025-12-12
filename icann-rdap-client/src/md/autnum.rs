@@ -1,10 +1,9 @@
 use icann_rdap_common::{prelude::ObjectCommonFields, response::Autnum};
 
-use super::MdHeaderText;
 use super::{
     string::StringUtil,
     table::{MultiPartTable, ToMpTable},
-    MdParams, MdUtil, ToMd,
+    MdHeaderText, MdParams, MdUtil, ToMd,
 };
 
 impl ToMd for Autnum {
@@ -94,10 +93,12 @@ impl MdUtil for Autnum {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{
-        httpdata::HttpData,
-        prelude::{Autnum, Remark, ToResponse},
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{
+            httpdata::HttpData,
+            prelude::{Autnum, Remark, ToResponse},
+        },
     };
 
     use crate::{

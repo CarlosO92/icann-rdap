@@ -249,10 +249,12 @@ impl MdUtil for Domain {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{
-        httpdata::HttpData,
-        prelude::{Domain, DsDatum, Event, Link, SecureDns, ToResponse, Variant, VariantName},
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{
+            httpdata::HttpData,
+            prelude::{Domain, DsDatum, Event, Link, SecureDns, ToResponse, Variant, VariantName},
+        },
     };
 
     use crate::{

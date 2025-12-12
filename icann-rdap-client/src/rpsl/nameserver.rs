@@ -56,8 +56,10 @@ impl KeyRef for Nameserver {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{httpdata::HttpData, prelude::Nameserver};
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{httpdata::HttpData, prelude::Nameserver},
+    };
 
     use crate::rpsl::{RpslParams, ToRpsl};
 

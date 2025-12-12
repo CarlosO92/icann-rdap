@@ -1,5 +1,10 @@
-use icann_rdap_common::{prelude::Remark, response::Stringish};
-use {icann_rdap_common::prelude::ObjectCommon, std::sync::LazyLock};
+use {
+    icann_rdap_common::{
+        prelude::{ObjectCommon, Remark},
+        response::Stringish,
+    },
+    std::sync::LazyLock,
+};
 
 use {
     icann_rdap_common::{

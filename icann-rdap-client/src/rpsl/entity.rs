@@ -135,8 +135,10 @@ fn key(entity: &Entity) -> (AttrName, String) {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{httpdata::HttpData, prelude::Entity};
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{httpdata::HttpData, prelude::Entity},
+    };
 
     use crate::rpsl::{RpslParams, ToRpsl};
 

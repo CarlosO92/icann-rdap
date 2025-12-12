@@ -90,10 +90,12 @@ impl MdUtil for Network {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{
-        httpdata::HttpData,
-        prelude::{Network, Remark, ToResponse},
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{
+            httpdata::HttpData,
+            prelude::{Network, Remark, ToResponse},
+        },
     };
 
     use crate::{

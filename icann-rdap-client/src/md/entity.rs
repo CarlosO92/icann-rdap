@@ -343,12 +343,14 @@ impl MdUtil for Entity {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{
-        httpdata::HttpData,
-        prelude::{
-            redacted::{Method, Name, Redacted},
-            Entity, ToResponse,
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{
+            httpdata::HttpData,
+            prelude::{
+                redacted::{Method, Name, Redacted},
+                Entity, ToResponse,
+            },
         },
     };
 

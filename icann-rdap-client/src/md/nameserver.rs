@@ -1,5 +1,4 @@
-use icann_rdap_common::prelude::ObjectCommonFields;
-use icann_rdap_common::response::Nameserver;
+use icann_rdap_common::{prelude::ObjectCommonFields, response::Nameserver};
 
 use super::{
     string::StringUtil,
@@ -93,10 +92,12 @@ impl MdUtil for Nameserver {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{
-        httpdata::HttpData,
-        prelude::{Nameserver, ToResponse},
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{
+            httpdata::HttpData,
+            prelude::{Nameserver, ToResponse},
+        },
     };
 
     use crate::{

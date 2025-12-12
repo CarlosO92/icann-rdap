@@ -5,8 +5,10 @@ use std::{
     str::FromStr,
 };
 
-use icann_rdap_client::rdap::ResponseData;
-use icann_rdap_common::{httpdata::HttpData, prelude::RdapResponse};
+use {
+    icann_rdap_client::rdap::ResponseData,
+    icann_rdap_common::{httpdata::HttpData, prelude::RdapResponse},
+};
 
 use {
     hickory_client::{

@@ -135,10 +135,12 @@ fn nameservers(nameservers: &[Nameserver], params: RpslParams) -> String {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{
-        httpdata::HttpData,
-        prelude::{Domain, Event},
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{
+            httpdata::HttpData,
+            prelude::{Domain, Event},
+        },
     };
 
     use crate::rpsl::{RpslParams, ToRpsl};
