@@ -99,8 +99,10 @@ mod tests {
 
     use rstest::rstest;
 
-    use crate::check::contains_check;
-    use crate::prelude::{Entity, ToResponse};
+    use crate::{
+        check::contains_check,
+        prelude::{Entity, ToResponse},
+    };
 
     use crate::{
         check::{Check, CheckParams, GetChecks},
