@@ -499,7 +499,7 @@ async fn main() -> Result<(), RdapServerError> {
             .build(),
     );
     storage.init().await?;
-    load_data(&config, &storage, false).await?;
+    load_data(&config, &storage, false, None, None).await?;
 
     let work = do_the_work(cli, &storage, &data_dir).await;
     match work {
