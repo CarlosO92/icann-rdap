@@ -2,13 +2,15 @@
 
 use std::{str::FromStr, sync::LazyLock};
 
-use chrono::DateTime;
-use icann_rdap_common::{
-    httpdata::HttpData,
-    prelude::{Entity, Event, Notice, ObjectCommonFields, PublicId, RdapResponse, Remark},
+use {
+    chrono::DateTime,
+    icann_rdap_common::{
+        httpdata::HttpData,
+        prelude::{Entity, Event, Notice, ObjectCommonFields, PublicId, RdapResponse, Remark},
+    },
+    strum::IntoEnumIterator,
+    strum_macros::{Display, EnumIter, EnumString},
 };
-use strum::IntoEnumIterator;
-use strum_macros::{Display, EnumIter, EnumString};
 
 pub mod autnum;
 pub mod domain;

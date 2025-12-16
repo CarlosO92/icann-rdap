@@ -67,8 +67,10 @@ impl KeyRef for Network {
 mod tests {
     use std::io::Write;
 
-    use goldenfile::Mint;
-    use icann_rdap_common::{httpdata::HttpData, prelude::Network};
+    use {
+        goldenfile::Mint,
+        icann_rdap_common::{httpdata::HttpData, prelude::Network},
+    };
 
     use crate::rpsl::{RpslParams, ToRpsl};
 
