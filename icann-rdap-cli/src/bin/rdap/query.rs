@@ -15,19 +15,21 @@ use {
     termimad::{crossterm::style::Color::*, Alignment, MadSkin},
 };
 
-use chrono::DateTime;
-use icann_rdap_client::rpsl::{RpslParams, ToRpsl};
-use icann_rdap_common::{
-    check::{
-        process::do_check_processing, traverse_checks, ALL_CHECK_CLASSES, WARNING_CHECK_CLASSES,
+use {
+    chrono::DateTime,
+    icann_rdap_client::rpsl::{RpslParams, ToRpsl},
+    icann_rdap_common::{
+        check::{
+            process::do_check_processing, traverse_checks, ALL_CHECK_CLASSES, WARNING_CHECK_CLASSES,
+        },
+        prelude::{Event, RdapResponse},
+        response::ObjectCommonFields,
     },
-    prelude::{Event, RdapResponse},
-    response::ObjectCommonFields,
+    json_pretty_compact::PrettyCompactFormatter,
+    serde::Serialize,
+    serde_json::Serializer,
+    tracing::warn,
 };
-use json_pretty_compact::PrettyCompactFormatter;
-use serde::Serialize;
-use serde_json::Serializer;
-use tracing::warn;
 
 use crate::{
     bootstrap::{get_base_url, BootstrapType},

@@ -2,10 +2,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Contains the results of test execution.
 use chrono::{DateTime, Utc};
-use icann_rdap_common::check::{
-    process::{do_check_processing, get_summaries},
-    CheckSummary,
-};
 use {
     icann_rdap_client::{
         md::{string::StringUtil, table::MultiPartTable, MdOptions},
@@ -13,7 +9,10 @@ use {
         RdapClientError,
     },
     icann_rdap_common::{
-        check::{Check, CheckClass, CheckItem, Checks},
+        check::{
+            process::{do_check_processing, get_summaries},
+            Check, CheckClass, CheckItem, CheckSummary, Checks,
+        },
         response::ExtensionId,
     },
     reqwest::StatusCode,

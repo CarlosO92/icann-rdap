@@ -1,8 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::test_jig::TestJig;
-use std::io::Write;
-use tempfile::NamedTempFile;
+use {crate::test_jig::TestJig, std::io::Write, tempfile::NamedTempFile};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_file_input() {

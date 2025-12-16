@@ -3,21 +3,25 @@ use std::{
     str::FromStr,
 };
 
-use clap::Args;
-use icann_rdap_cli::rt::exec::{HttpTestOptions, StringTestOptions, TestType};
-use icann_rdap_common::check::{ALL_CHECK_CLASSES, ERROR_CHECK_CLASSES, WARNING_CHECK_CLASSES};
 #[cfg(debug_assertions)]
 use tracing::warn;
 use {
-    clap::builder::{styling::AnsiColor, Styles},
+    clap::{
+        builder::{styling::AnsiColor, Styles},
+        Args,
+    },
     error::RdapTestError,
     icann_rdap_cli::{
-        dirs,
-        dirs::fcbs::FileCacheBootstrapStore,
-        rt::exec::{execute_tests, ExtensionGroup, TestOptions},
+        dirs::{self, fcbs::FileCacheBootstrapStore},
+        rt::exec::{
+            execute_tests, ExtensionGroup, HttpTestOptions, StringTestOptions, TestOptions,
+            TestType,
+        },
     },
     icann_rdap_client::{http::ClientConfig, md::MdOptions, rdap::QueryType},
-    icann_rdap_common::check::CheckClass,
+    icann_rdap_common::check::{
+        CheckClass, ALL_CHECK_CLASSES, ERROR_CHECK_CLASSES, WARNING_CHECK_CLASSES,
+    },
     termimad::{crossterm::style::Color::*, Alignment, MadSkin},
     tracing::info,
     tracing_subscriber::filter::LevelFilter,
