@@ -758,123 +758,151 @@ pub(crate) async fn reload_data(
 
     loop {
         sleep(Duration::from_millis(1000)).await;
-        if let Ok(meta) = tokio::fs::metadata(&update_path).await {
-            let modified = meta.modified()?;
-            if modified > last_update {
-                last_update = modified;
-                info!("Data being updated.");
+        if let Err(err) = process_reload_iteration(
+            &config,
+            &*store,
+            &mut file_state,
+            &update_path,
+            &update_list_path,
+            &reload_path,
+            &mut last_update,
+            &mut last_reload,
+        )
+        .await
+        {
+            warn!("Auto-reload iteration failed: {err}");
+        }
+    }
+}
 
-                let mut update_files: Option<Vec<PathBuf>> = None;
-                let mut update_list_modified = None;
-                match tokio::fs::metadata(&update_list_path).await {
+async fn process_reload_iteration(
+    config: &ServiceConfig,
+    store: &dyn StoreOps,
+    file_state: &mut HashMap<PathBuf, DataFileState>,
+    update_path: &PathBuf,
+    update_list_path: &PathBuf,
+    reload_path: &PathBuf,
+    last_update: &mut SystemTime,
+    last_reload: &mut SystemTime,
+) -> Result<(), RdapServerError> {
+    if let Ok(meta) = tokio::fs::metadata(update_path).await {
+        let modified = meta.modified()?;
+        if modified > *last_update {
+            *last_update = modified;
+            info!("Data being updated.");
+
+            let mut update_files: Option<Vec<PathBuf>> = None;
+            let mut update_list_modified = None;
+            match tokio::fs::metadata(update_list_path).await {
+                Ok(list_meta) => {
+                    update_list_modified = Some(list_meta.modified()?);
+                    let contents = tokio::fs::read_to_string(update_list_path).await?;
+                    let files: Vec<PathBuf> = contents
+                        .lines()
+                        .filter_map(|line| {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(PathBuf::from(trimmed))
+                            }
+                        })
+                        .collect();
+                    if !files.is_empty() {
+                        update_files = Some(files);
+                    }
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+
+            if let Some(files) = update_files.as_ref() {
+                load_data(
+                    config,
+                    store,
+                    false,
+                    Some(file_state),
+                    Some(files.as_slice()),
+                )
+                .await?;
+            } else {
+                load_data(config, store, false, Some(file_state), None).await?;
+            }
+
+            let mut update_removed = false;
+            match tokio::fs::remove_file(update_path).await {
+                Ok(()) => update_removed = true,
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        warn!(
+                            "Unable to remove update flag {} after processing: {}",
+                            update_path.display(),
+                            err
+                        );
+                    } else {
+                        update_removed = true;
+                    }
+                }
+            }
+
+            if let Some(original_modified) = update_list_modified {
+                match tokio::fs::metadata(update_list_path).await {
                     Ok(list_meta) => {
-                        update_list_modified = Some(list_meta.modified()?);
-                        let contents = tokio::fs::read_to_string(&update_list_path).await?;
-                        let files: Vec<PathBuf> = contents
-                            .lines()
-                            .filter_map(|line| {
-                                let trimmed = line.trim();
-                                if trimmed.is_empty() {
-                                    None
-                                } else {
-                                    Some(PathBuf::from(trimmed))
-                                }
-                            })
-                            .collect();
-                        if !files.is_empty() {
-                            update_files = Some(files);
+                        if list_meta.modified()? <= original_modified {
+                            let _ = tokio::fs::remove_file(update_list_path).await;
                         }
                     }
                     Err(err) if err.kind() == ErrorKind::NotFound => {}
                     Err(err) => return Err(err.into()),
                 }
-
-                if let Some(files) = update_files.as_ref() {
-                    load_data(
-                        &config,
-                        &*store,
-                        false,
-                        Some(&mut file_state),
-                        Some(files.as_slice()),
-                    )
-                    .await?;
-                } else {
-                    load_data(&config, &*store, false, Some(&mut file_state), None).await?;
-                }
-
-                let mut update_removed = false;
-                match tokio::fs::remove_file(&update_path).await {
-                    Ok(()) => update_removed = true,
-                    Err(err) => {
-                        if err.kind() != ErrorKind::NotFound {
-                            warn!(
-                                "Unable to remove update flag {} after processing: {}",
-                                update_path.display(),
-                                err
-                            );
-                        } else {
-                            update_removed = true;
-                        }
-                    }
-                }
-
-                if let Some(original_modified) = update_list_modified {
-                    match tokio::fs::metadata(&update_list_path).await {
-                        Ok(list_meta) => {
-                            if list_meta.modified()? <= original_modified {
-                                let _ = tokio::fs::remove_file(&update_list_path).await;
-                            }
-                        }
-                        Err(err) if err.kind() == ErrorKind::NotFound => {}
-                        Err(err) => return Err(err.into()),
-                    }
-                }
-
-                if update_removed {
-                    last_update = modified
-                        .checked_sub(Duration::from_nanos(1))
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
-                }
             }
-        }
 
-        if let Ok(meta) = tokio::fs::metadata(&reload_path).await {
-            let modified = meta.modified()?;
-            if modified > last_reload {
-                info!("Data being reloaded.");
-
-                load_data(&config, &*store, true, Some(&mut file_state), None).await?;
-
-                let mut reload_removed = false;
-                match tokio::fs::remove_file(&reload_path).await {
-                    Ok(()) => reload_removed = true,
-                    Err(err) => {
-                        if err.kind() != ErrorKind::NotFound {
-                            warn!(
-                                "Unable to remove reload flag {} after processing: {}",
-                                reload_path.display(),
-                                err
-                            );
-                        } else {
-                            reload_removed = true;
-                        }
-                    }
-                }
-
-                if reload_removed {
-                    last_reload = modified
-                        .checked_sub(Duration::from_nanos(1))
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
-                } else {
-                    last_reload = modified;
-                }
-            } else if modified == last_reload {
-                // In case removing the reload flag failed and the timestamp didn't
-                // advance, keep the stored value to avoid tight looping.
-                last_reload = modified;
+            if update_removed {
+                *last_update = modified
+                    .checked_sub(Duration::from_nanos(1))
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
             }
         }
     }
+
+    if let Ok(meta) = tokio::fs::metadata(reload_path).await {
+        let modified = meta.modified()?;
+        if modified > *last_reload {
+            info!("Data being reloaded.");
+
+            load_data(config, store, true, Some(file_state), None).await?;
+
+            let mut reload_removed = false;
+            match tokio::fs::remove_file(reload_path).await {
+                Ok(()) => reload_removed = true,
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        warn!(
+                            "Unable to remove reload flag {} after processing: {}",
+                            reload_path.display(),
+                            err
+                        );
+                    } else {
+                        reload_removed = true;
+                    }
+                }
+            }
+
+            if reload_removed {
+                *last_reload = modified
+                    .checked_sub(Duration::from_nanos(1))
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+            } else {
+                *last_reload = modified;
+            }
+        } else if modified == *last_reload {
+            // In case removing the reload flag failed and the timestamp didn't
+            // advance, keep the stored value to avoid tight looping.
+            *last_reload = modified;
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn trigger_update_files(
