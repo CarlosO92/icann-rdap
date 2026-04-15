@@ -4,6 +4,7 @@ use {
     clap::{Args, Parser, Subcommand},
     icann_rdap_client::rdap::QueryType,
     icann_rdap_common::{
+        check::StringCheck,
         contact::{Contact, PostalAddress},
         media_types::RDAP_MEDIA_TYPE,
         prelude::{RdapResponse, ToNotices, ToRemarks, ToResponse, VectorStringish},
@@ -341,7 +342,7 @@ struct DomainArgs {
     #[arg(long)]
     handle: Option<String>,
 
-    /// Letters-Digits-Hyphen name.
+    /// Letters-Digits-Hyphen name. May optionally end with a trailing dot.
     #[arg(long)]
     ldh: Option<String>,
 
@@ -401,6 +402,30 @@ fn parse_ds_datum(arg: &str) -> Result<DsDatum, RdapServerError> {
         .digest(strings[3].to_owned())
         .build();
     Ok(ds_datum)
+}
+
+fn normalize_ldh_name(ldh: &str) -> Result<String, RdapServerError> {
+    let trimmed = ldh.trim();
+    if trimmed.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "LDH domain name must not be empty.".to_string(),
+        ));
+    }
+
+    let normalized = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    if normalized.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "LDH domain name must contain at least one label.".to_string(),
+        ));
+    }
+
+    if !normalized.is_ldh_domain_name() {
+        return Err(RdapServerError::InvalidArg(format!(
+            "Invalid LDH domain name: {ldh}",
+        )));
+    }
+
+    Ok(normalized.to_string())
 }
 
 #[derive(Debug, Args)]
@@ -946,16 +971,16 @@ async fn make_domain(
 ) -> Result<Output, RdapServerError> {
     // get ldh from idn u-label if ldh is not given
     let ldh = if let Some(ldh_arg) = args.ldh.as_ref() {
-        ldh_arg.to_owned()
+        normalize_ldh_name(ldh_arg)?
     } else if let Some(idn_arg) = args.idn.as_ref() {
-        idna::domain_to_ascii(idn_arg)
-            .map_err(|_| RdapServerError::InvalidArg("Invalid IDN U-Label".to_string()))?
+        let ascii = idna::domain_to_ascii(idn_arg)
+            .map_err(|_| RdapServerError::InvalidArg("Invalid IDN U-Label".to_string()))?;
+        normalize_ldh_name(&ascii)?
     } else {
         panic!("neither ldh or idn specified. this should have been caught in arg parsing.")
-    }
+    };
 
     // get unicodeName (idn) from ldh if idn is not given
-    ;
     let unicode_name = if let Some(idn_arg) = args.idn {
         idn_arg
     } else {
@@ -1110,7 +1135,7 @@ fn make_help(args: SrvHelpArgs) -> Result<Output, RdapServerError> {
 mod tests {
     use icann_rdap_common::response::DsDatum;
 
-    use crate::{parse_ds_datum, parse_notice_or_remark};
+    use crate::{normalize_ldh_name, parse_ds_datum, parse_notice_or_remark};
 
     #[test]
     fn cli_debug_assert_test() {
@@ -1181,5 +1206,29 @@ mod tests {
             .digest("THISISADIGEST".to_string())
             .build();
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn GIVEN_ldh_with_trailing_dot_WHEN_normalized_THEN_dot_is_removed() {
+        // GIVEN
+        let ldh = "foo.example.";
+
+        // WHEN
+        let actual = normalize_ldh_name(ldh).expect("normalizing ldh");
+
+        // THEN
+        assert_eq!(actual, "foo.example");
+    }
+
+    #[test]
+    fn GIVEN_invalid_ldh_WHEN_normalized_THEN_error_is_returned() {
+        // GIVEN
+        let ldh = "foo..example";
+
+        // WHEN
+        let actual = normalize_ldh_name(ldh);
+
+        // THEN
+        assert!(actual.is_err());
     }
 }
