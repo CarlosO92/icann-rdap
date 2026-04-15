@@ -23,6 +23,10 @@ use crate::{
 
 use super::{config::MemConfig, label_search::SearchLabels, tx::MemTx};
 
+fn canonicalize_ldh_key(ldh: &str) -> String {
+    ldh.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 #[derive(Clone)]
 pub struct Mem {
     pub(crate) autnums: Arc<RwLock<RangeMap<u32, Arc<RdapResponse>>>>,
@@ -92,7 +96,8 @@ impl StoreOps for Mem {
 
     async fn get_domain_by_ldh(&self, ldh: &str) -> Result<RdapResponse, RdapServerError> {
         let domains = self.domains.read().await;
-        let result = domains.get(ldh);
+        let canonical_ldh = canonicalize_ldh_key(ldh);
+        let result = domains.get(&canonical_ldh);
         match result {
             Some(domain) => Ok(RdapResponse::clone(domain)),
             None => Ok(NOT_FOUND.clone()),

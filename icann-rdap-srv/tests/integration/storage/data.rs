@@ -76,6 +76,35 @@ async fn GIVEN_data_dir_with_domain_WHEN_mem_init_THEN_domain_is_loaded() {
 }
 
 #[tokio::test]
+async fn GIVEN_domain_with_mixed_case_and_trailing_dot_WHEN_queried_by_canonical_ldh_THEN_domain_is_found(
+) {
+    // GIVEN
+    let ldh_name = "Foo.Example.";
+    let temp = TestDir::temp();
+    let domain = Domain::builder().ldh_name(ldh_name).build();
+    let domain_file = temp.path("foo_example.json");
+    std::fs::write(
+        domain_file,
+        serde_json::to_string(&domain).expect("serializing domain"),
+    )
+    .expect("writing file");
+
+    // WHEN
+    let mem = new_and_init_mem(temp.root().to_string_lossy().to_string()).await;
+    let actual = mem
+        .get_domain_by_ldh("foo.example")
+        .await
+        .expect("getting domain by canonical ldh");
+
+    // THEN
+    assert!(matches!(actual, RdapResponse::Domain(_)));
+    let RdapResponse::Domain(domain) = actual else {
+        panic!()
+    };
+    assert_eq!(domain.ldh_name.as_ref().expect("ldhName is none"), ldh_name)
+}
+
+#[tokio::test]
 async fn GIVEN_data_dir_with_domain_template_WHEN_mem_init_THEN_domains_are_loaded() {
     // GIVEN
     let ldh1 = "foo.example";
