@@ -14,7 +14,9 @@ use {
 use crate::{
     error::RdapServerError,
     storage::{
-        data::{AutnumId, DomainId, EntityId, NameserverId, NetworkId},
+        data::{
+            AutnumId, DomainId, EntityId, NameserverId, NetworkId, NetworkIdType, StoredRecord,
+        },
         TxHandle,
     },
 };
@@ -147,6 +149,148 @@ impl MemTx {
             entities_by_full_name: SearchLabels::name_labels().build(),
             srvhelps: HashMap::new(),
         }
+    }
+
+    fn remove_domain_record(&mut self, canonical_ldh: &str, unicode_name: Option<&String>) {
+        self.domains.remove(canonical_ldh);
+        if self.mem.config.common_config.domain_search_by_name_enable {
+            self.domains_by_name.remove(canonical_ldh);
+        }
+        if let Some(unicode_name) = unicode_name {
+            self.idns.remove(unicode_name);
+        }
+    }
+
+    fn remove_domain_value_from_ns_indexes(
+        &mut self,
+        canonical_ldh: &str,
+        nameserver_ips: &[IpAddr],
+        nameserver_ldh_names: &[String],
+    ) {
+        if self.mem.config.common_config.domain_search_by_ns_ip_enable {
+            for ip in nameserver_ips {
+                if let Some(domains) = self.domains_by_ns_ip.get_mut(ip) {
+                    domains.retain(|response| {
+                        !matches!(
+                            response.as_ref(),
+                            RdapResponse::Domain(domain)
+                                if domain
+                                    .ldh_name
+                                    .as_ref()
+                                    .map(|ldh| canonicalize_ldh_key(ldh) == canonical_ldh)
+                                    .unwrap_or(false)
+                        )
+                    });
+                    if domains.is_empty() {
+                        self.domains_by_ns_ip.remove(ip);
+                    }
+                }
+            }
+        }
+
+        if self
+            .mem
+            .config
+            .common_config
+            .domain_search_by_ns_ldh_name_enable
+        {
+            for nameserver_ldh_name in nameserver_ldh_names {
+                self.domains_by_ns_ldh_name.remove(nameserver_ldh_name);
+            }
+        }
+    }
+
+    fn remove_nameserver_record(&mut self, ldh_name: &str, ip_addresses: &[IpAddr]) {
+        self.nameservers.remove(ldh_name);
+        if self
+            .mem
+            .config
+            .common_config
+            .nameserver_search_by_name_enable
+        {
+            self.nameservers_by_name.remove(ldh_name);
+        }
+        if self.mem.config.common_config.nameserver_search_by_ip_enable {
+            for ip in ip_addresses {
+                if let Some(nameservers) = self.nameservers_by_ip.get_mut(ip) {
+                    nameservers.retain(|response| {
+                        !matches!(
+                            response.as_ref(),
+                            RdapResponse::Nameserver(nameserver)
+                                if nameserver.ldh_name.as_deref() == Some(ldh_name)
+                        )
+                    });
+                    if nameservers.is_empty() {
+                        self.nameservers_by_ip.remove(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    fn remove_entity_record(&mut self, handle: &str, full_name: Option<&String>) {
+        self.entities.remove(handle);
+        if self.mem.config.common_config.entity_search_by_handle_enable {
+            self.entities_by_handle.remove(handle);
+        }
+        if self
+            .mem
+            .config
+            .common_config
+            .entity_search_by_full_name_enable
+        {
+            if let Some(full_name) = full_name {
+                self.entities_by_full_name.remove(full_name);
+            }
+        }
+    }
+
+    fn remove_network_record(&mut self, network_id: &NetworkIdType) -> Result<(), RdapServerError> {
+        let subnets = match network_id {
+            NetworkIdType::Cidr(cidr) => cidr.subnets(cidr.prefix_len())?,
+            NetworkIdType::Range {
+                start_address,
+                end_address,
+            } => {
+                let start_addr = IpAddr::from_str(start_address)?;
+                let end_addr = IpAddr::from_str(end_address)?;
+                if start_addr.is_ipv4() && end_addr.is_ipv4() {
+                    let IpAddr::V4(start_addr) = start_addr else {
+                        panic!("check failed")
+                    };
+                    let IpAddr::V4(end_addr) = end_addr else {
+                        panic!("check failed")
+                    };
+                    IpSubnets::from(Ipv4Subnets::new(start_addr, end_addr, 0))
+                } else if start_addr.is_ipv6() && end_addr.is_ipv6() {
+                    let IpAddr::V6(start_addr) = start_addr else {
+                        panic!("check failed")
+                    };
+                    let IpAddr::V6(end_addr) = end_addr else {
+                        panic!("check failed")
+                    };
+                    IpSubnets::from(Ipv6Subnets::new(start_addr, end_addr, 0))
+                } else {
+                    return Err(RdapServerError::EmptyIndexData(
+                        "mismatch ip version".to_string(),
+                    ));
+                }
+            }
+        };
+
+        match subnets {
+            IpSubnets::V4(subnets) => {
+                for net in subnets {
+                    self.ip4.remove(&net);
+                }
+            }
+            IpSubnets::V6(subnets) => {
+                for net in subnets {
+                    self.ip6.remove(&net);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -451,6 +595,47 @@ impl TxHandle for MemTx {
         let host = host.unwrap_or("..default");
         self.srvhelps
             .insert(host.to_string(), Arc::new(help.clone().to_response()));
+        Ok(())
+    }
+
+    async fn remove_records(&mut self, records: &[StoredRecord]) -> Result<(), RdapServerError> {
+        for record in records {
+            match record {
+                StoredRecord::Domain(domain) => {
+                    self.remove_domain_record(&domain.canonical_ldh, domain.unicode_name.as_ref());
+                    self.remove_domain_value_from_ns_indexes(
+                        &domain.canonical_ldh,
+                        &domain.nameserver_ips,
+                        &domain.nameserver_ldh_names,
+                    );
+                }
+                StoredRecord::DomainError { canonical_ldh } => {
+                    self.domains.remove(canonical_ldh);
+                }
+                StoredRecord::Entity(entity) => {
+                    self.remove_entity_record(&entity.handle, entity.full_name.as_ref());
+                }
+                StoredRecord::EntityError { handle } => {
+                    self.entities.remove(handle);
+                }
+                StoredRecord::Nameserver(nameserver) => {
+                    self.remove_nameserver_record(&nameserver.ldh_name, &nameserver.ip_addresses);
+                }
+                StoredRecord::NameserverError { ldh_name } => {
+                    self.nameservers.remove(ldh_name);
+                }
+                StoredRecord::Autnum(autnum) | StoredRecord::AutnumError(autnum) => {
+                    self.autnums
+                        .remove((autnum.start_autnum)..=(autnum.end_autnum));
+                }
+                StoredRecord::Network(network) | StoredRecord::NetworkError(network) => {
+                    self.remove_network_record(&network.network_id)?;
+                }
+                StoredRecord::SrvHelp { host } => {
+                    self.srvhelps.remove(host);
+                }
+            }
+        }
         Ok(())
     }
 

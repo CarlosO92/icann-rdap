@@ -8,7 +8,7 @@ use {
 use crate::{
     error::RdapServerError,
     storage::{
-        data::{AutnumId, DomainId, EntityId, NameserverId, NetworkId},
+        data::{AutnumId, DomainId, EntityId, NameserverId, NetworkId, StoredRecord},
         TxHandle,
     },
 };
@@ -104,6 +104,10 @@ impl TxHandle for PgTx<'_> {
         _help: &icann_rdap_common::response::Help,
         _host: Option<&str>,
     ) -> Result<(), RdapServerError> {
+        todo!()
+    }
+
+    async fn remove_records(&mut self, _records: &[StoredRecord]) -> Result<(), RdapServerError> {
         todo!()
     }
 

@@ -7,7 +7,7 @@ use {
 
 use crate::error::RdapServerError;
 
-use self::data::{AutnumId, DomainId, EntityId, NameserverId, NetworkId};
+use self::data::{AutnumId, DomainId, EntityId, NameserverId, NetworkId, StoredRecord};
 
 pub mod data;
 pub mod mem;
@@ -152,6 +152,9 @@ pub trait TxHandle: Send {
         help: &Help,
         host: Option<&str>,
     ) -> Result<(), RdapServerError>;
+
+    /// Remove records from storage.
+    async fn remove_records(&mut self, records: &[StoredRecord]) -> Result<(), RdapServerError>;
 
     /// Commit the transaction.
     async fn commit(self: Box<Self>) -> Result<(), RdapServerError>;

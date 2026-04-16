@@ -375,6 +375,91 @@ async fn validate_partial_update_file_reload() {
 }
 
 #[tokio::test]
+async fn validate_partial_update_removes_stale_data_from_reloaded_file() {
+    // GIVEN
+    let temp = TestDir::temp();
+    let original_domain = Domain::builder().ldh_name("foo.example").build();
+    let stable_domain = Domain::builder().ldh_name("bar.example").build();
+    let replacement_domain = Domain::builder().ldh_name("baz.example").build();
+    let rotating_path = temp.path("rotating.json");
+    let stable_path = temp.path("stable.json");
+    std::fs::write(
+        &rotating_path,
+        serde_json::to_string(&original_domain).expect("serializing original domain"),
+    )
+    .expect("writing original domain");
+    std::fs::write(
+        &stable_path,
+        serde_json::to_string(&stable_domain).expect("serializing stable domain"),
+    )
+    .expect("writing stable domain");
+
+    let mem_config = MemConfig::builder()
+        .common_config(CommonConfig::default())
+        .build();
+    let mem = Mem::new(mem_config.clone());
+    mem.init().await.expect("initializing memory");
+    let service_config = ServiceConfig::non_server()
+        .data_dir(temp.root().to_string_lossy().to_string())
+        .storage_type(StorageType::Memory(mem_config))
+        .build()
+        .expect("building service config");
+    let mut state: HashMap<PathBuf, DataFileState> = HashMap::new();
+    load_data(&service_config, &mem, false, Some(&mut state), None)
+        .await
+        .expect("initial load");
+
+    // WHEN
+    sleep(Duration::from_millis(10)).await;
+    std::fs::write(
+        &rotating_path,
+        serde_json::to_string(&replacement_domain).expect("serializing replacement domain"),
+    )
+    .expect("writing replacement domain");
+    let update_files = vec![PathBuf::from("rotating.json")];
+    load_data(
+        &service_config,
+        &mem,
+        false,
+        Some(&mut state),
+        Some(update_files.as_slice()),
+    )
+    .await
+    .expect("partial update");
+
+    // THEN
+    let not_found = mem
+        .get_domain_by_ldh("foo.example")
+        .await
+        .expect("fetching original domain after replacement");
+    assert!(!matches!(not_found, RdapResponse::Domain(_)));
+
+    let RdapResponse::Domain(replacement) = mem
+        .get_domain_by_ldh("baz.example")
+        .await
+        .expect("fetching replacement domain")
+    else {
+        panic!("baz.example should be a domain response");
+    };
+    assert_eq!(
+        replacement.ldh_name.as_ref().expect("ldhName is none"),
+        "baz.example"
+    );
+
+    let RdapResponse::Domain(stable) = mem
+        .get_domain_by_ldh("bar.example")
+        .await
+        .expect("fetching stable domain")
+    else {
+        panic!("bar.example should be a domain response");
+    };
+    assert_eq!(
+        stable.ldh_name.as_ref().expect("ldhName is none"),
+        "bar.example"
+    );
+}
+
+#[tokio::test]
 async fn GIVEN_data_dir_with_autnum_WHEN_mem_init_THEN_autnum_is_loaded() {
     // GIVEN
     let num = 700u32;

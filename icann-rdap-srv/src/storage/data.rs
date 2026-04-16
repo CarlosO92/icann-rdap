@@ -183,11 +183,58 @@ pub enum DataFileType {
     Help,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DomainRecord {
+    pub canonical_ldh: String,
+    pub unicode_name: Option<String>,
+    pub nameserver_ips: Vec<IpAddr>,
+    pub nameserver_ldh_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityRecord {
+    pub handle: String,
+    pub full_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameserverRecord {
+    pub ldh_name: String,
+    pub ip_addresses: Vec<IpAddr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutnumRecord {
+    pub start_autnum: u32,
+    pub end_autnum: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkRecord {
+    pub network_id: NetworkIdType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredRecord {
+    Domain(DomainRecord),
+    DomainError { canonical_ldh: String },
+    Entity(EntityRecord),
+    EntityError { handle: String },
+    Nameserver(NameserverRecord),
+    NameserverError { ldh_name: String },
+    Autnum(AutnumRecord),
+    AutnumError(AutnumRecord),
+    Network(NetworkRecord),
+    NetworkError(NetworkRecord),
+    SrvHelp { host: String },
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataFileState {
     pub modified: SystemTime,
     pub len: u64,
     pub file_type: DataFileType,
+    pub records: Vec<StoredRecord>,
 }
 
 pub async fn load_data(
@@ -197,14 +244,6 @@ pub async fn load_data(
     mut file_state: Option<&mut HashMap<PathBuf, DataFileState>>,
     files: Option<&[PathBuf]>,
 ) -> Result<(), RdapServerError> {
-    let mut json_count: usize = 0;
-    let mut template_count: usize = 0;
-    let mut srvhelp_count: usize = 0;
-    let mut tx = if truncate {
-        store.new_truncate_tx().await?
-    } else {
-        store.new_tx().await?
-    };
     let path = PathBuf::from(&config.data_dir);
     if !path.exists() || !path.is_dir() {
         warn!(
@@ -213,205 +252,309 @@ pub async fn load_data(
         );
         return Ok(());
     }
-    // When performing a full reload we keep the existing state until after all
-    // files have been processed so we can determine which files were removed
-    // from the directory. The state will be updated with the new modification
-    // times as we load each file and pruned at the end of the run.
 
-    let mut current = if truncate { Some(HashSet::new()) } else { None };
+    if let Some(state) = file_state.as_deref_mut() {
+        if files.is_some() && !truncate {
+            load_partial_data_files(config, store, state, files.expect("checked")).await?;
+        } else {
+            load_state_from_directory(config, store, state).await?;
+        }
+    } else {
+        load_data_from_directory(config, store, truncate).await?;
+    }
+
+    Ok(())
+}
+
+fn data_file_type(entry_path: &PathBuf) -> Option<DataFileType> {
+    match entry_path.extension().and_then(|e| e.to_str()) {
+        Some("template") => Some(DataFileType::Template),
+        Some("json") => Some(DataFileType::Json),
+        Some("help") => Some(DataFileType::Help),
+        _ => None,
+    }
+}
+
+fn canonicalize_ldh_key(ldh: &str) -> String {
+    ldh.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn domain_record_from_domain(domain: &Domain) -> Result<DomainRecord, RdapServerError> {
+    let ldh_name = domain
+        .ldh_name
+        .as_ref()
+        .ok_or_else(|| RdapServerError::EmptyIndexData("ldhName".to_string()))?;
+    let canonical_ldh = canonicalize_ldh_key(ldh_name);
+    if canonical_ldh.is_empty() {
+        return Err(RdapServerError::InvalidArg(ldh_name.to_owned()));
+    }
+
+    let mut nameserver_ips = Vec::new();
+    let mut nameserver_ldh_names = Vec::new();
+    if let Some(nameservers) = domain.nameservers.as_ref() {
+        for nameserver in nameservers {
+            if let Some(ldh_name) = nameserver.ldh_name.as_ref() {
+                nameserver_ldh_names.push(ldh_name.to_owned());
+            }
+            if let Some(ip_addresses) = nameserver.ip_addresses() {
+                for ip_str in ip_addresses.v4s() {
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        nameserver_ips.push(ip);
+                    }
+                }
+                for ip_str in ip_addresses.v6s() {
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        nameserver_ips.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(DomainRecord {
+        canonical_ldh,
+        unicode_name: domain.unicode_name.clone(),
+        nameserver_ips,
+        nameserver_ldh_names,
+    })
+}
+
+fn entity_record_from_entity(entity: &Entity) -> Result<EntityRecord, RdapServerError> {
+    let handle = entity
+        .object_common
+        .handle
+        .as_ref()
+        .ok_or_else(|| RdapServerError::EmptyIndexData("handle".to_string()))?;
+    Ok(EntityRecord {
+        handle: handle.to_string(),
+        full_name: entity
+            .contact()
+            .and_then(|contact| contact.full_name().map(str::to_string)),
+    })
+}
+
+fn nameserver_record_from_nameserver(
+    nameserver: &Nameserver,
+) -> Result<NameserverRecord, RdapServerError> {
+    let ldh_name = nameserver
+        .ldh_name
+        .as_ref()
+        .ok_or_else(|| RdapServerError::EmptyIndexData("ldhName".to_string()))?;
+    let mut ip_addresses = Vec::new();
+    if let Some(addresses) = nameserver.ip_addresses() {
+        for ip_str in addresses.v4s() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                ip_addresses.push(ip);
+            }
+        }
+        for ip_str in addresses.v6s() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                ip_addresses.push(ip);
+            }
+        }
+    }
+    Ok(NameserverRecord {
+        ldh_name: ldh_name.to_owned(),
+        ip_addresses,
+    })
+}
+
+fn autnum_record_from_autnum(autnum: &Autnum) -> Result<AutnumRecord, RdapServerError> {
+    let start_autnum = autnum
+        .start_autnum
+        .as_ref()
+        .and_then(|n| n.as_u32())
+        .ok_or_else(|| RdapServerError::EmptyIndexData("startNum".to_string()))?;
+    let end_autnum = autnum
+        .end_autnum
+        .as_ref()
+        .and_then(|n| n.as_u32())
+        .ok_or_else(|| RdapServerError::EmptyIndexData("endNum".to_string()))?;
+    Ok(AutnumRecord {
+        start_autnum,
+        end_autnum,
+    })
+}
+
+fn network_record_from_network(network: &Network) -> Result<NetworkRecord, RdapServerError> {
+    let start_address = network
+        .start_address
+        .as_ref()
+        .ok_or_else(|| RdapServerError::EmptyIndexData("startAddress".to_string()))?;
+    let end_address = network
+        .end_address
+        .as_ref()
+        .ok_or_else(|| RdapServerError::EmptyIndexData("endAddress".to_string()))?;
+
+    Ok(NetworkRecord {
+        network_id: NetworkIdType::Range {
+            start_address: start_address.to_owned(),
+            end_address: end_address.to_owned(),
+        },
+    })
+}
+
+async fn load_state_from_directory(
+    config: &ServiceConfig,
+    store: &dyn StoreOps,
+    file_state: &mut HashMap<PathBuf, DataFileState>,
+) -> Result<(), RdapServerError> {
+    let path = PathBuf::from(&config.data_dir);
+    let mut tx = store.new_truncate_tx().await?;
+    let mut next_state = HashMap::new();
+    let mut json_count = 0;
+    let mut template_count = 0;
+    let mut srvhelp_count = 0;
+
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        let Some(file_type) = data_file_type(&entry_path) else {
+            continue;
+        };
+        let meta = entry.metadata().await?;
+        let contents = tokio::fs::read_to_string(&entry_path).await?;
+        let records = load_data_file(&entry_path, file_type, &contents, &mut tx).await?;
+        next_state.insert(
+            entry_path,
+            DataFileState {
+                modified: meta.modified()?,
+                len: meta.len(),
+                file_type,
+                records,
+            },
+        );
+        match file_type {
+            DataFileType::Json => json_count += 1,
+            DataFileType::Template => template_count += 1,
+            DataFileType::Help => srvhelp_count += 1,
+        }
+    }
+
+    log_load_counts(json_count, template_count, srvhelp_count);
+    tx.commit().await?;
+    *file_state = next_state;
+    Ok(())
+}
+
+async fn load_partial_data_files(
+    config: &ServiceConfig,
+    store: &dyn StoreOps,
+    file_state: &mut HashMap<PathBuf, DataFileState>,
+    files: &[PathBuf],
+) -> Result<(), RdapServerError> {
+    let data_dir = PathBuf::from(&config.data_dir);
     let mut processed: HashSet<PathBuf> = HashSet::new();
-    if let Some(files) = files {
-        for file in files {
-            let entry_path = if file.is_absolute() {
-                file.clone()
-            } else {
-                path.join(file)
-            };
-            if !processed.insert(entry_path.clone()) {
+    let mut tx = store.new_tx().await?;
+
+    for file in files {
+        let entry_path = if file.is_absolute() {
+            file.clone()
+        } else {
+            data_dir.join(file)
+        };
+        if !processed.insert(entry_path.clone()) {
+            continue;
+        }
+
+        if let Some(previous_state) = file_state.remove(&entry_path) {
+            tx.remove_records(&previous_state.records).await?;
+        }
+
+        let meta = match tokio::fs::metadata(&entry_path).await {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                info!("Removing deleted file from cache: {}", entry_path.display());
                 continue;
             }
-            let meta = match tokio::fs::metadata(&entry_path).await {
-                Ok(meta) => meta,
-                Err(err) if err.kind() == ErrorKind::NotFound => {
-                    warn!(
-                        "File {} provided for update does not exist.",
-                        entry_path.display()
-                    );
-                    continue;
-                }
-                Err(err) => return Err(err.into()),
-            };
-            let modified = meta.modified()?;
-            let len = meta.len();
+            Err(err) => return Err(err.into()),
+        };
 
-            let ext = entry_path.extension().and_then(|e| e.to_str());
-            let file_type = match ext {
-                Some("template") => DataFileType::Template,
-                Some("json") => DataFileType::Json,
-                Some("help") => DataFileType::Help,
-                _ => {
-                    continue;
-                }
-            };
+        let Some(file_type) = data_file_type(&entry_path) else {
+            continue;
+        };
 
-            if file_state
-                .as_deref()
-                .is_some_and(|state| state.contains_key(&entry_path))
-            {
-                info!("Reloading modified file: {}", entry_path.display());
-            } else {
-                info!("Loading new file: {}", entry_path.display());
-            }
-
-            let contents = tokio::fs::read_to_string(&entry_path).await?;
-
-            match file_type {
-                DataFileType::Template => {
-                    load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-                    template_count += 1;
-                }
-                DataFileType::Json => {
-                    load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-                    json_count += 1;
-                }
-                DataFileType::Help => {
-                    let file_name = entry_path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    load_srvhelp(
-                        &contents,
-                        &entry_path.to_string_lossy(),
-                        &file_name,
-                        &mut tx,
-                    )
-                    .await?;
-                    srvhelp_count += 1;
-                }
-            }
-
-            if let Some(state) = file_state.as_deref_mut() {
-                state.insert(
-                    entry_path.clone(),
-                    DataFileState {
-                        modified,
-                        len,
-                        file_type,
-                    },
-                );
-            }
-        }
-    } else {
-        let mut entries = tokio::fs::read_dir(path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let entry_path = entry.path();
-            let meta = tokio::fs::metadata(&entry_path).await?;
-            let modified = meta.modified()?;
-            let len = meta.len();
-            if let Some(current) = current.as_mut() {
-                current.insert(entry_path.clone());
-            }
-
-            let ext = entry_path.extension().and_then(|e| e.to_str());
-            let file_type = match ext {
-                Some("template") => DataFileType::Template,
-                Some("json") => DataFileType::Json,
-                Some("help") => DataFileType::Help,
-                _ => {
-                    continue;
-                }
-            };
-
-            if let Some(state) = file_state.as_deref() {
-                if truncate {
-                    info!("Loading new file: {}", entry_path.display());
-                } else if let Some(prev) = state.get(&entry_path) {
-                    if prev.modified >= modified && prev.len == len {
-                        info!("Skipping unchanged file: {}", entry_path.display());
-                        continue;
-                    } else {
-                        info!("Reloading modified file: {}", entry_path.display());
-                    }
-                } else {
-                    info!("Loading new file: {}", entry_path.display());
-                }
-            }
-
-            let contents = tokio::fs::read_to_string(&entry_path).await?;
-
-            match file_type {
-                DataFileType::Template => {
-                    load_rdap_template(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-                    template_count += 1;
-                }
-                DataFileType::Json => {
-                    load_rdap(&contents, &entry_path.to_string_lossy(), &mut tx).await?;
-                    json_count += 1;
-                }
-                DataFileType::Help => {
-                    load_srvhelp(
-                        &contents,
-                        &entry_path.to_string_lossy(),
-                        &entry.file_name().to_string_lossy(),
-                        &mut tx,
-                    )
-                    .await?;
-                    srvhelp_count += 1;
-                }
-            }
-
-            if let Some(state) = file_state.as_deref_mut() {
-                state.insert(
-                    entry_path.clone(),
-                    DataFileState {
-                        modified,
-                        len,
-                        file_type,
-                    },
-                );
-            }
-        }
+        info!("Reloading modified file: {}", entry_path.display());
+        let contents = tokio::fs::read_to_string(&entry_path).await?;
+        let records = load_data_file(&entry_path, file_type, &contents, &mut tx).await?;
+        file_state.insert(
+            entry_path,
+            DataFileState {
+                modified: meta.modified()?,
+                len: meta.len(),
+                file_type,
+                records,
+            },
+        );
     }
 
-    if truncate {
-        if let (Some(state), Some(current)) = (file_state.as_deref_mut(), current) {
-            state.retain(|p, _| {
-                let keep = current.contains(p);
-                if !keep {
-                    info!("Removing deleted file from cache: {}", p.display());
-                }
-                keep
-            });
-        }
-    }
-
-    if let Some(state) = file_state.as_deref() {
-        let mut json_total = 0;
-        let mut template_total = 0;
-        let mut help_total = 0;
-        for entry in state.values() {
-            match entry.file_type {
-                DataFileType::Json => json_total += 1,
-                DataFileType::Template => template_total += 1,
-                DataFileType::Help => help_total += 1,
-            }
-        }
-        info!("{json_total} RDAP JSON files loaded.");
-        info!("{template_total} RDAP template files loaded.");
-        info!("{help_total} RDAP server help files loaded.");
-        if json_total == 0 && template_total == 0 && help_total == 0 {
-            warn!("No data loaded. Server has no content to serve.");
-        }
-    } else {
-        info!("{json_count} RDAP JSON files loaded.");
-        info!("{template_count} RDAP template files loaded.");
-        info!("{srvhelp_count} RDAP server help files loaded.");
-        if json_count == 0 && template_count == 0 && srvhelp_count == 0 {
-            warn!("No data loaded. Server has no content to serve.");
-        }
-    }
     tx.commit().await?;
     Ok(())
+}
+
+fn log_load_counts(json_count: usize, template_count: usize, srvhelp_count: usize) {
+    info!("{json_count} RDAP JSON files loaded.");
+    info!("{template_count} RDAP template files loaded.");
+    info!("{srvhelp_count} RDAP server help files loaded.");
+    if json_count == 0 && template_count == 0 && srvhelp_count == 0 {
+        warn!("No data loaded. Server has no content to serve.");
+    }
+}
+
+async fn load_data_from_directory(
+    config: &ServiceConfig,
+    store: &dyn StoreOps,
+    truncate: bool,
+) -> Result<(), RdapServerError> {
+    let mut json_count = 0;
+    let mut template_count = 0;
+    let mut srvhelp_count = 0;
+    let mut tx = if truncate {
+        store.new_truncate_tx().await?
+    } else {
+        store.new_tx().await?
+    };
+
+    let path = PathBuf::from(&config.data_dir);
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        let Some(file_type) = data_file_type(&entry_path) else {
+            continue;
+        };
+        let contents = tokio::fs::read_to_string(&entry_path).await?;
+        load_data_file(&entry_path, file_type, &contents, &mut tx).await?;
+        match file_type {
+            DataFileType::Template => template_count += 1,
+            DataFileType::Json => json_count += 1,
+            DataFileType::Help => srvhelp_count += 1,
+        }
+    }
+
+    log_load_counts(json_count, template_count, srvhelp_count);
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn load_data_file(
+    entry_path: &PathBuf,
+    file_type: DataFileType,
+    contents: &str,
+    tx: &mut Box<dyn TxHandle>,
+) -> Result<Vec<StoredRecord>, RdapServerError> {
+    match file_type {
+        DataFileType::Template => {
+            load_rdap_template(contents, &entry_path.to_string_lossy(), tx).await
+        }
+        DataFileType::Json => load_rdap(contents, &entry_path.to_string_lossy(), tx).await,
+        DataFileType::Help => {
+            let file_name = entry_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            load_srvhelp(contents, &entry_path.to_string_lossy(), &file_name, tx).await
+        }
+    }
 }
 
 /// Loads the RDAP JSON files and puts them in storage.
@@ -419,7 +562,7 @@ async fn load_rdap(
     contents: &str,
     path_name: &str,
     tx: &mut Box<dyn TxHandle>,
-) -> Result<(), RdapServerError> {
+) -> Result<Vec<StoredRecord>, RdapServerError> {
     debug!("loading {path_name} into storage");
     let json = serde_json::from_str::<Value>(contents);
     let Ok(value) = json else {
@@ -429,15 +572,35 @@ async fn load_rdap(
     let Ok(rdap) = rdap else {
         return Err(RdapServerError::NonRdapJsonFile(path_name.to_owned()));
     };
-    match rdap {
-        RdapResponse::Entity(entity) => tx.add_entity(&entity).await,
-        RdapResponse::Domain(domain) => tx.add_domain(&domain).await,
-        RdapResponse::Nameserver(nameserver) => tx.add_nameserver(&nameserver).await,
-        RdapResponse::Autnum(autnum) => tx.add_autnum(&autnum).await,
-        RdapResponse::Network(network) => tx.add_network(&network).await,
+    let record = match rdap {
+        RdapResponse::Entity(entity) => {
+            let record = StoredRecord::Entity(entity_record_from_entity(&entity)?);
+            tx.add_entity(&entity).await?;
+            record
+        }
+        RdapResponse::Domain(domain) => {
+            let record = StoredRecord::Domain(domain_record_from_domain(&domain)?);
+            tx.add_domain(&domain).await?;
+            record
+        }
+        RdapResponse::Nameserver(nameserver) => {
+            let record = StoredRecord::Nameserver(nameserver_record_from_nameserver(&nameserver)?);
+            tx.add_nameserver(&nameserver).await?;
+            record
+        }
+        RdapResponse::Autnum(autnum) => {
+            let record = StoredRecord::Autnum(autnum_record_from_autnum(&autnum)?);
+            tx.add_autnum(&autnum).await?;
+            record
+        }
+        RdapResponse::Network(network) => {
+            let record = StoredRecord::Network(network_record_from_network(&network)?);
+            tx.add_network(&network).await?;
+            record
+        }
         _ => return Err(RdapServerError::NonRdapJsonFile(path_name.to_owned())),
-    }?;
-    Ok(())
+    };
+    Ok(vec![record])
 }
 
 /// Loads the RDAP HELP files and puts them in storage.
@@ -446,7 +609,7 @@ async fn load_srvhelp(
     path_name: &str,
     file_name: &str,
     tx: &mut Box<dyn TxHandle>,
-) -> Result<(), RdapServerError> {
+) -> Result<Vec<StoredRecord>, RdapServerError> {
     debug!("loading {path_name} into storage");
     let Some(host) = file_name.strip_suffix(".help") else {
         return Err(RdapServerError::NonRdapJsonFile(path_name.to_string()));
@@ -464,7 +627,7 @@ async fn load_srvhelp(
         RdapResponse::Help(srvhelp) => tx.add_srv_help(&srvhelp, Some(&host)).await,
         _ => return Err(RdapServerError::NonRdapJsonFile(path_name.to_owned())),
     }?;
-    Ok(())
+    Ok(vec![StoredRecord::SrvHelp { host }])
 }
 
 /// Loads the template files, creates RDAP objects from the templates, and puts them
@@ -473,10 +636,11 @@ async fn load_rdap_template(
     contents: &str,
     path_name: &str,
     tx: &mut Box<dyn TxHandle>,
-) -> Result<(), RdapServerError> {
+) -> Result<Vec<StoredRecord>, RdapServerError> {
     debug!("processing {path_name} template");
     let json = serde_json::from_str::<Template>(contents);
     if let Ok(value) = json {
+        let mut records = Vec::new();
         match value {
             Template::Domain { domain, ids } => {
                 for id in ids {
@@ -485,9 +649,13 @@ async fn load_rdap_template(
                         DomainOrError::DomainObject(domain) => {
                             let domain = make_domain_from_template(domain, id);
                             tx.add_domain(&domain).await?;
+                            records.push(StoredRecord::Domain(domain_record_from_domain(&domain)?));
                         }
                         DomainOrError::ErrorResponse(error) => {
                             tx.add_domain_err(&id, error).await?;
+                            records.push(StoredRecord::DomainError {
+                                canonical_ldh: canonicalize_ldh_key(&id.ldh_name),
+                            });
                         }
                     };
                 }
@@ -499,9 +667,13 @@ async fn load_rdap_template(
                         EntityOrError::EntityObject(entity) => {
                             let entity = make_entity_from_template(entity, id);
                             tx.add_entity(&entity).await?;
+                            records.push(StoredRecord::Entity(entity_record_from_entity(&entity)?));
                         }
                         EntityOrError::ErrorResponse(error) => {
                             tx.add_entity_err(&id, error).await?;
+                            records.push(StoredRecord::EntityError {
+                                handle: id.handle.clone(),
+                            });
                         }
                     };
                 }
@@ -513,9 +685,15 @@ async fn load_rdap_template(
                         NameserverOrError::NameserverObject(nameserver) => {
                             let nameserver = make_nameserver_from_template(nameserver, id);
                             tx.add_nameserver(&nameserver).await?;
+                            records.push(StoredRecord::Nameserver(
+                                nameserver_record_from_nameserver(&nameserver)?,
+                            ));
                         }
                         NameserverOrError::ErrorResponse(error) => {
                             tx.add_nameserver_err(&id, error).await?;
+                            records.push(StoredRecord::NameserverError {
+                                ldh_name: id.ldh_name.clone(),
+                            });
                         }
                     };
                 }
@@ -527,9 +705,14 @@ async fn load_rdap_template(
                         AutnumOrError::AutnumObject(autnum) => {
                             let autnum = make_autnum_from_template(autnum, id);
                             tx.add_autnum(&autnum).await?;
+                            records.push(StoredRecord::Autnum(autnum_record_from_autnum(&autnum)?));
                         }
                         AutnumOrError::ErrorResponse(error) => {
                             tx.add_autnum_err(&id, error).await?;
+                            records.push(StoredRecord::AutnumError(AutnumRecord {
+                                start_autnum: id.start_autnum,
+                                end_autnum: id.end_autnum,
+                            }));
                         }
                     };
                 }
@@ -541,18 +724,24 @@ async fn load_rdap_template(
                         NetworkOrError::NetworkObject(network) => {
                             let network = make_network_from_template(network, id)?;
                             tx.add_network(&network).await?;
+                            records.push(StoredRecord::Network(network_record_from_network(
+                                &network,
+                            )?));
                         }
                         NetworkOrError::ErrorResponse(error) => {
                             tx.add_network_err(&id, error).await?;
+                            records.push(StoredRecord::NetworkError(NetworkRecord {
+                                network_id: id.network_id.clone(),
+                            }));
                         }
                     };
                 }
             }
         };
+        Ok(records)
     } else {
-        return Err(RdapServerError::NonJsonFile(path_name.to_owned()));
+        Err(RdapServerError::NonJsonFile(path_name.to_owned()))
     }
-    Ok(())
 }
 
 pub(crate) async fn reload_data(

@@ -65,6 +65,27 @@ impl<T: Clone> SearchLabels<T> {
             .insert(text, Some(value.clone()));
     }
 
+    /// Remove a value based on a label search key.
+    pub(crate) fn remove(&mut self, text: &str) {
+        for (i, char) in text.char_indices() {
+            if self.separaters.contains(&char) && i != 0 {
+                let prefix = &text[..i];
+                let mut next_i = i + 1;
+                while !text.is_char_boundary(next_i) {
+                    next_i += 1;
+                }
+                let suffix = &text[next_i..];
+                if let Some(trie) = self.label_suffixes.get_mut(suffix) {
+                    trie.remove(prefix);
+                }
+            }
+        }
+
+        if let Some(trie) = self.label_suffixes.get_mut("") {
+            trie.remove(text);
+        }
+    }
+
     /// Search values based on a label search
     pub(crate) fn search(&self, search: &str) -> Result<Vec<T>, RdapServerError> {
         // search string is invalid if it doesn't have only one asterisk ('*')
