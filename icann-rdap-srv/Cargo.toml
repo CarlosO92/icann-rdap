@@ -31,6 +31,7 @@ ipnet.workspace = true
 headers.workspace = true
 http.workspace = true
 hyper.workspace = true
+mimalloc = "0.1"
 pct-str.workspace = true
 prefix-trie.workspace = true
 regex.workspace = true
