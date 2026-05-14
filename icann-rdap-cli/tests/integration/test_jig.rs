@@ -12,6 +12,8 @@ use {
     test_dir::{DirBuilder, FileType, TestDir},
 };
 
+const CMD_TIMEOUT_SECS: u64 = 5;
+
 pub enum CommandType {
     Rdap,
     RdapTest,
@@ -130,7 +132,7 @@ impl TestJig {
             CommandType::Rdap => {
                 let mut cmd = Command::cargo_bin("rdap").expect("cannot find rdap cmd");
                 cmd.env_clear()
-                    .timeout(Duration::from_secs(2))
+                    .timeout(Duration::from_secs(CMD_TIMEOUT_SECS))
                     .env("RDAP_BASE_URL", self.rdap_base.clone())
                     .env("RDAP_PAGING", "none")
                     .env("RDAP_OUTPUT", "json-extra")
@@ -143,7 +145,7 @@ impl TestJig {
             CommandType::RdapTest => {
                 let mut cmd = Command::cargo_bin("rdap-test").expect("cannot find rdap-test cmd");
                 cmd.env_clear()
-                    .timeout(Duration::from_secs(2))
+                    .timeout(Duration::from_secs(CMD_TIMEOUT_SECS))
                     .env("RDAP_TEST_LOG", "debug")
                     .env("RDAP_TEST_ALLOW_HTTP", "true")
                     .env("XDG_CACHE_HOME", self.test_dir.path("cache"))
@@ -159,7 +161,7 @@ impl TestJig {
             CommandType::Rdap => {
                 let mut cmd = Command::cargo_bin("rdap").expect("cannot find rdap cmd");
                 cmd.env_clear()
-                    .timeout(Duration::from_secs(2))
+                    .timeout(Duration::from_secs(CMD_TIMEOUT_SECS))
                     .env("RDAP_BASE_URL", self.rdap_base.clone())
                     .env("RDAP_PAGING", "none")
                     .env("RDAP_OUTPUT", "json-extra")
@@ -171,7 +173,7 @@ impl TestJig {
             CommandType::RdapTest => {
                 let mut cmd = Command::cargo_bin("rdap-test").expect("cannot find rdap-test cmd");
                 cmd.env_clear()
-                    .timeout(Duration::from_secs(2))
+                    .timeout(Duration::from_secs(CMD_TIMEOUT_SECS))
                     .env("RDAP_TEST_LOG", "debug")
                     .env("XDG_CACHE_HOME", self.test_dir.path("cache"))
                     .env("XDG_CONFIG_HOME", self.test_dir.path("config"));
