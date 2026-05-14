@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 pub const UPDATE: &str = "update";
 pub const UPDATE_LIST: &str = "update.list";
+pub const DELETE_LIST: &str = "delete.list";
 pub const RELOAD: &str = "reload";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Display)]
@@ -752,6 +753,7 @@ pub(crate) async fn reload_data(
     let data_dir = PathBuf::from(&config.data_dir);
     let update_path = data_dir.join(UPDATE);
     let update_list_path = data_dir.join(UPDATE_LIST);
+    let delete_list_path = data_dir.join(DELETE_LIST);
     let reload_path = data_dir.join(RELOAD);
     let mut last_update = SystemTime::UNIX_EPOCH;
     let mut last_reload = SystemTime::UNIX_EPOCH;
@@ -764,6 +766,7 @@ pub(crate) async fn reload_data(
             &mut file_state,
             &update_path,
             &update_list_path,
+            &delete_list_path,
             &reload_path,
             &mut last_update,
             &mut last_reload,
@@ -781,6 +784,7 @@ async fn process_reload_iteration(
     file_state: &mut HashMap<PathBuf, DataFileState>,
     update_path: &PathBuf,
     update_list_path: &PathBuf,
+    delete_list_path: &PathBuf,
     reload_path: &PathBuf,
     last_update: &mut SystemTime,
     last_reload: &mut SystemTime,
@@ -791,38 +795,19 @@ async fn process_reload_iteration(
             *last_update = modified;
             info!("Data being updated.");
 
-            let mut update_files: Option<Vec<PathBuf>> = None;
-            let mut update_list_modified = None;
-            match tokio::fs::metadata(update_list_path).await {
-                Ok(list_meta) => {
-                    update_list_modified = Some(list_meta.modified()?);
-                    let contents = tokio::fs::read_to_string(update_list_path).await?;
-                    let files: Vec<PathBuf> = contents
-                        .lines()
-                        .filter_map(|line| {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                None
-                            } else {
-                                Some(PathBuf::from(trimmed))
-                            }
-                        })
-                        .collect();
-                    if !files.is_empty() {
-                        update_files = Some(files);
-                    }
-                }
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
-            }
+            let mut listed_files = Vec::new();
+            let update_list_modified =
+                read_partial_file_list(update_list_path, &mut listed_files).await?;
+            let delete_list_modified =
+                read_partial_file_list(delete_list_path, &mut listed_files).await?;
 
-            if let Some(files) = update_files.as_ref() {
+            if !listed_files.is_empty() {
                 load_data(
                     config,
                     store,
                     false,
                     Some(file_state),
-                    Some(files.as_slice()),
+                    Some(listed_files.as_slice()),
                 )
                 .await?;
             } else {
@@ -845,17 +830,8 @@ async fn process_reload_iteration(
                 }
             }
 
-            if let Some(original_modified) = update_list_modified {
-                match tokio::fs::metadata(update_list_path).await {
-                    Ok(list_meta) => {
-                        if list_meta.modified()? <= original_modified {
-                            let _ = tokio::fs::remove_file(update_list_path).await;
-                        }
-                    }
-                    Err(err) if err.kind() == ErrorKind::NotFound => {}
-                    Err(err) => return Err(err.into()),
-                }
-            }
+            remove_processed_list_file(update_list_path, update_list_modified).await?;
+            remove_processed_list_file(delete_list_path, delete_list_modified).await?;
 
             if update_removed {
                 *last_update = modified
@@ -905,28 +881,89 @@ async fn process_reload_iteration(
     Ok(())
 }
 
-pub async fn trigger_update_files(
-    data_dir: &str,
-    files: &[PathBuf],
-) -> Result<(), RdapServerError> {
-    if files.is_empty() {
-        return Err(RdapServerError::InvalidArg(
-            "No files provided for partial update.".to_string(),
-        ));
+async fn read_partial_file_list(
+    list_path: &PathBuf,
+    listed_files: &mut Vec<PathBuf>,
+) -> Result<Option<SystemTime>, RdapServerError> {
+    match tokio::fs::metadata(list_path).await {
+        Ok(list_meta) => {
+            let modified = list_meta.modified()?;
+            let contents = tokio::fs::read_to_string(list_path).await?;
+            listed_files.extend(contents.lines().filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(trimmed))
+                }
+            }));
+            Ok(Some(modified))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
     }
-    let data_path = PathBuf::from(data_dir);
-    let canonical_data_path = tokio::fs::canonicalize(&data_path)
-        .await
-        .unwrap_or_else(|_| data_path.clone());
-    let mut relative_files: Vec<PathBuf> = Vec::with_capacity(files.len());
-    for file in files {
-        let absolute = if file.is_absolute() {
-            file.clone()
-        } else {
-            data_path.join(file)
-        };
-        let canonical_file = tokio::fs::canonicalize(&absolute).await?;
-        if !canonical_file.starts_with(&canonical_data_path) {
+}
+
+async fn remove_processed_list_file(
+    list_path: &PathBuf,
+    original_modified: Option<SystemTime>,
+) -> Result<(), RdapServerError> {
+    let Some(original_modified) = original_modified else {
+        return Ok(());
+    };
+    match tokio::fs::metadata(list_path).await {
+        Ok(list_meta) => {
+            if list_meta.modified()? <= original_modified {
+                let _ = tokio::fs::remove_file(list_path).await;
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+
+async fn normalize_listed_data_file_path(
+    data_path: &PathBuf,
+    canonical_data_path: &PathBuf,
+    file: &PathBuf,
+    require_exists: bool,
+) -> Result<PathBuf, RdapServerError> {
+    if file.is_absolute() {
+        if require_exists || tokio::fs::metadata(file).await.is_ok() {
+            let canonical_file = tokio::fs::canonicalize(file).await?;
+            if !canonical_file.starts_with(canonical_data_path) {
+                return Err(RdapServerError::InvalidArg(format!(
+                    "File {} is outside of data directory {}",
+                    canonical_file.display(),
+                    canonical_data_path.display()
+                )));
+            }
+            let relative = canonical_file
+                .strip_prefix(canonical_data_path)
+                .unwrap_or(&canonical_file)
+                .to_path_buf();
+            return normalize_relative_listed_data_file_path(&relative);
+        }
+
+        if let Ok(relative) = file.strip_prefix(canonical_data_path) {
+            return normalize_relative_listed_data_file_path(&relative.to_path_buf());
+        }
+        if let Ok(relative) = file.strip_prefix(data_path) {
+            return normalize_relative_listed_data_file_path(&relative.to_path_buf());
+        }
+
+        return Err(RdapServerError::InvalidArg(format!(
+            "File {} is outside of data directory {}",
+            file.display(),
+            canonical_data_path.display()
+        )));
+    }
+
+    let relative = normalize_relative_listed_data_file_path(file)?;
+    if require_exists {
+        let canonical_file = tokio::fs::canonicalize(data_path.join(&relative)).await?;
+        if !canonical_file.starts_with(canonical_data_path) {
             return Err(RdapServerError::InvalidArg(format!(
                 "File {} is outside of data directory {}",
                 canonical_file.display(),
@@ -934,12 +971,45 @@ pub async fn trigger_update_files(
             )));
         }
         let relative = canonical_file
-            .strip_prefix(&canonical_data_path)
+            .strip_prefix(canonical_data_path)
             .unwrap_or(&canonical_file)
             .to_path_buf();
-        relative_files.push(relative);
+        return normalize_relative_listed_data_file_path(&relative);
     }
-    let update_list_path = data_path.join(UPDATE_LIST);
+
+    Ok(relative)
+}
+
+fn normalize_relative_listed_data_file_path(file: &PathBuf) -> Result<PathBuf, RdapServerError> {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in file.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(RdapServerError::InvalidArg(format!(
+                    "File {} is outside of data directory",
+                    file.display()
+                )));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "File path cannot be empty.".to_string(),
+        ));
+    }
+
+    Ok(normalized)
+}
+
+async fn write_partial_update_list(
+    list_path: &PathBuf,
+    relative_files: &[PathBuf],
+) -> Result<(), RdapServerError> {
     let mut contents = String::new();
     for file in relative_files {
         if !contents.is_empty() {
@@ -947,9 +1017,83 @@ pub async fn trigger_update_files(
         }
         contents.push_str(&file.to_string_lossy());
     }
-    tokio::fs::write(&update_list_path, contents).await?;
+    tokio::fs::write(list_path, contents).await?;
+    Ok(())
+}
+
+async fn normalize_partial_update_list(
+    data_dir: &str,
+    files: &[PathBuf],
+    require_exists: bool,
+) -> Result<Vec<PathBuf>, RdapServerError> {
+    let data_path = PathBuf::from(data_dir);
+    let canonical_data_path = tokio::fs::canonicalize(&data_path)
+        .await
+        .unwrap_or_else(|_| data_path.clone());
+    let mut relative_files: Vec<PathBuf> = Vec::with_capacity(files.len());
+    for file in files {
+        let relative =
+            normalize_listed_data_file_path(&data_path, &canonical_data_path, file, require_exists)
+                .await?;
+        relative_files.push(relative);
+    }
+    Ok(relative_files)
+}
+
+pub async fn trigger_partial_update_files(
+    data_dir: &str,
+    update_files: &[PathBuf],
+    delete_files: &[PathBuf],
+) -> Result<(), RdapServerError> {
+    if update_files.is_empty() && delete_files.is_empty() {
+        return Err(RdapServerError::InvalidArg(
+            "No files provided for partial update.".to_string(),
+        ));
+    }
+
+    let normalized_update_files =
+        normalize_partial_update_list(data_dir, update_files, true).await?;
+    let normalized_delete_files =
+        normalize_partial_update_list(data_dir, delete_files, false).await?;
+
+    let normalized_update_set = normalized_update_files
+        .iter()
+        .cloned()
+        .collect::<HashSet<PathBuf>>();
+    if let Some(conflicting_file) = normalized_delete_files
+        .iter()
+        .find(|file| normalized_update_set.contains(*file))
+    {
+        return Err(RdapServerError::InvalidArg(format!(
+            "File {} cannot be scheduled for both update and delete.",
+            conflicting_file.display()
+        )));
+    }
+
+    let data_path = PathBuf::from(data_dir);
+    if !normalized_update_files.is_empty() {
+        write_partial_update_list(&data_path.join(UPDATE_LIST), &normalized_update_files).await?;
+    }
+    if !normalized_delete_files.is_empty() {
+        write_partial_update_list(&data_path.join(DELETE_LIST), &normalized_delete_files).await?;
+    }
+
     trigger_update(data_dir).await?;
     Ok(())
+}
+
+pub async fn trigger_update_files(
+    data_dir: &str,
+    files: &[PathBuf],
+) -> Result<(), RdapServerError> {
+    trigger_partial_update_files(data_dir, files, &[]).await
+}
+
+pub async fn trigger_delete_files(
+    data_dir: &str,
+    files: &[PathBuf],
+) -> Result<(), RdapServerError> {
+    trigger_partial_update_files(data_dir, &[], files).await
 }
 
 pub async fn trigger_reload(data_dir: &str) -> Result<(), RdapServerError> {

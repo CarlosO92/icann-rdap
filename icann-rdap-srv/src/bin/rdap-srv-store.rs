@@ -12,8 +12,9 @@ use {
         config::{data_dir, debug_config_vars, LOG},
         error::RdapServerError,
         storage::data::{
-            trigger_reload, trigger_update, trigger_update_files, AutnumOrError, DomainOrError,
-            EntityOrError, NameserverOrError, NetworkIdType, NetworkOrError, Template,
+            trigger_partial_update_files, trigger_reload, trigger_update, AutnumOrError,
+            DomainOrError, EntityOrError, NameserverOrError, NetworkIdType, NetworkOrError,
+            Template,
         },
         util::bin::check::{check_rdap, to_check_classes, CheckArgs},
     },
@@ -54,6 +55,17 @@ struct Cli {
     )]
     update_files: Vec<PathBuf>,
 
+    /// Remove storage entries for specific files that were deleted from the data directory.
+    ///
+    /// Only the provided files will be removed from the running server cache.
+    #[arg(
+        long = "delete-file",
+        value_name = "FILE",
+        num_args = 1..,
+        conflicts_with_all = ["reload", "update"]
+    )]
+    delete_files: Vec<PathBuf>,
+
     /// Reload storage.
     ///
     /// If true, storage is completely reloaded.
@@ -88,8 +100,8 @@ async fn main() -> Result<(), RdapServerError> {
     // signal update or reload
     if cli.reload {
         trigger_reload(&data_dir).await?;
-    } else if !cli.update_files.is_empty() {
-        trigger_update_files(&data_dir, &cli.update_files).await?;
+    } else if !cli.update_files.is_empty() || !cli.delete_files.is_empty() {
+        trigger_partial_update_files(&data_dir, &cli.update_files, &cli.delete_files).await?;
     } else if cli.update {
         trigger_update(&data_dir).await?;
     };

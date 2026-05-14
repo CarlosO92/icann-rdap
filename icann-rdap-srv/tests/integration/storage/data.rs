@@ -11,10 +11,11 @@ use {
         config::{ServiceConfig, StorageType},
         storage::{
             data::{
-                load_data, AutnumId, AutnumOrError::AutnumObject, DataFileState, DomainId,
-                DomainOrError, EntityId, EntityOrError::EntityObject, NameserverId,
-                NameserverOrError::NameserverObject, NetworkId, NetworkIdType,
-                NetworkOrError::NetworkObject, Template,
+                load_data, trigger_delete_files, trigger_partial_update_files, AutnumId,
+                AutnumOrError::AutnumObject, DataFileState, DomainId, DomainOrError, EntityId,
+                EntityOrError::EntityObject, NameserverId, NameserverOrError::NameserverObject,
+                NetworkId, NetworkIdType, NetworkOrError::NetworkObject, Template, DELETE_LIST,
+                UPDATE,
             },
             mem::{config::MemConfig, ops::Mem},
             CommonConfig, StoreOps,
@@ -456,6 +457,119 @@ async fn validate_partial_update_removes_stale_data_from_reloaded_file() {
     assert_eq!(
         stable.ldh_name.as_ref().expect("ldhName is none"),
         "bar.example"
+    );
+}
+
+#[tokio::test]
+async fn validate_partial_update_removes_deleted_file_from_memory() {
+    // GIVEN
+    let temp = TestDir::temp();
+    let deleted_domain = Domain::builder().ldh_name("foo.example").build();
+    let retained_domain = Domain::builder().ldh_name("bar.example").build();
+    let deleted_path = temp.path("deleted.json");
+    let retained_path = temp.path("retained.json");
+    std::fs::write(
+        &deleted_path,
+        serde_json::to_string(&deleted_domain).expect("serializing deleted domain"),
+    )
+    .expect("writing deleted domain");
+    std::fs::write(
+        &retained_path,
+        serde_json::to_string(&retained_domain).expect("serializing retained domain"),
+    )
+    .expect("writing retained domain");
+
+    let mem_config = MemConfig::builder()
+        .common_config(CommonConfig::default())
+        .build();
+    let mem = Mem::new(mem_config.clone());
+    mem.init().await.expect("initializing memory");
+    let service_config = ServiceConfig::non_server()
+        .data_dir(temp.root().to_string_lossy().to_string())
+        .storage_type(StorageType::Memory(mem_config))
+        .build()
+        .expect("building service config");
+    let mut state: HashMap<PathBuf, DataFileState> = HashMap::new();
+    load_data(&service_config, &mem, false, Some(&mut state), None)
+        .await
+        .expect("initial load");
+
+    // WHEN
+    std::fs::remove_file(&deleted_path).expect("removing deleted domain file");
+    let deleted_files = vec![PathBuf::from("deleted.json")];
+    load_data(
+        &service_config,
+        &mem,
+        false,
+        Some(&mut state),
+        Some(deleted_files.as_slice()),
+    )
+    .await
+    .expect("partial delete update");
+
+    // THEN
+    let deleted_lookup = mem
+        .get_domain_by_ldh("foo.example")
+        .await
+        .expect("fetching removed domain");
+    assert!(!matches!(deleted_lookup, RdapResponse::Domain(_)));
+
+    let RdapResponse::Domain(retained_lookup) = mem
+        .get_domain_by_ldh("bar.example")
+        .await
+        .expect("fetching retained domain")
+    else {
+        panic!("bar.example should still be present");
+    };
+    assert_eq!(
+        retained_lookup.ldh_name.as_ref().expect("ldhName is none"),
+        "bar.example"
+    );
+}
+
+#[tokio::test]
+async fn GIVEN_deleted_paths_WHEN_trigger_delete_files_THEN_delete_list_and_update_flag_are_written(
+) {
+    // GIVEN
+    let temp = TestDir::temp();
+    let data_dir = temp.root().to_string_lossy().to_string();
+    let deleted_path = temp.path("deleted.json");
+
+    // WHEN
+    trigger_delete_files(&data_dir, &[deleted_path.clone()])
+        .await
+        .expect("triggering delete files");
+
+    // THEN
+    let delete_list_path = temp.path(DELETE_LIST);
+    let delete_list_contents =
+        std::fs::read_to_string(delete_list_path).expect("reading delete list");
+    assert_eq!(delete_list_contents.trim(), "deleted.json");
+    assert!(temp.path(UPDATE).exists());
+}
+
+#[tokio::test]
+async fn GIVEN_same_file_in_update_and_delete_WHEN_trigger_partial_update_files_THEN_error() {
+    // GIVEN
+    let temp = TestDir::temp();
+    let data_dir = temp.root().to_string_lossy().to_string();
+    let shared_path = temp.path("shared.json");
+    std::fs::write(&shared_path, "{}").expect("writing shared file");
+
+    // WHEN
+    let result = trigger_partial_update_files(
+        &data_dir,
+        &[PathBuf::from("shared.json")],
+        &[PathBuf::from("shared.json")],
+    )
+    .await;
+
+    // THEN
+    let err = result.expect_err("should reject overlapping update/delete paths");
+    assert!(
+        err.to_string()
+            .contains("cannot be scheduled for both update and delete"),
+        "unexpected error: {err}"
     );
 }
 
